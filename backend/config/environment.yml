@@ -1,0 +1,13 @@
+﻿name: Blackjack-GestureAI
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pytorch
+  - torchvision
+  - opencv
+  - fastapi
+  - uvicorn
+  - sqlite
