@@ -19,10 +19,10 @@ cd Blackjack-GestureAI
 ### 3️⃣ Create and Activate the Environment & Install Node Dependencies
 Set up the Conda environment with all Python dependencies and install the Node packages:
 ```bash
-cd backend/config
+cd backend
 conda env create -f environment.yml
 conda activate Blackjack-GestureAI
-cd ../../frontend
+cd ../frontend
 npm install
 cd ..
 ```
