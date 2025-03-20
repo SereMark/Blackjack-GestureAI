@@ -1,26 +1,42 @@
-﻿import React from "react";
+﻿import { Routes, Route, useLocation } from "react-router-dom";
+import { AnimatePresence } from "framer-motion";
+import BackgroundSwirls from "./components/BackgroundSwirls";
+import PageWrapper from "./components/PageWrapper";
+import HomePage from "./pages/HomePage";
+import GamePage from "./pages/GamePage";
+
+function AnimatedRoutes() {
+  const location = useLocation();
+  return (
+    <AnimatePresence mode="wait">
+      <Routes key={location.pathname} location={location}>
+        <Route
+          path="/"
+          element={
+            <PageWrapper>
+              <HomePage />
+            </PageWrapper>
+          }
+        />
+        <Route
+          path="/game"
+          element={
+            <PageWrapper>
+              <GamePage />
+            </PageWrapper>
+          }
+        />
+      </Routes>
+    </AnimatePresence>
+  );
+}
 
 function App() {
   return (
-    <div className="relative min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-gray-900 to-purple-800 text-white overflow-hidden">
-      {/* Two swirling, color-shifting circles */}
-      <div className="absolute top-[-160px] left-[-160px] w-[550px] h-[550px] rounded-full opacity-50 blur-3xl animate-swirlWithColor" />
-      <div className="absolute bottom-[-160px] right-[-160px] w-[550px] h-[550px] rounded-full opacity-50 blur-3xl animate-swirlWithColor2" />
-
-      {/* Main content container */}
-      <div className="relative z-10 flex flex-col items-center text-center px-6">
-        {/* Headline: fadeZoomIn, slight delay for tagline */}
-        <h1 className="text-4xl sm:text-5xl font-bold mb-5 leading-tight animate-fadeZoomIn">
-          ♠️ GestureAI Blackjack ♠️
-        </h1>
-
-        {/* Tagline: fadeSlideUp with a short delay */}
-        <p className="text-lg sm:text-xl text-gray-100 max-w-lg leading-relaxed animate-fadeSlideUp delay-[150ms]">
-          Enhance your blackjack strategy with intuitive <br className="hidden md:block" />
-          AI-driven gesture controls.
-        </p>
-      </div>
-    </div>
+    <>
+      <BackgroundSwirls />
+      <AnimatedRoutes />
+    </>
   );
 }
 
