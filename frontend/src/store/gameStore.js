@@ -1,10 +1,14 @@
 import { create } from "zustand";
 import {
-  createDeck,
-  shuffleDeck,
-  calculateScore,
-  dealInitialHands
-} from "../utils/blackjackLogic";
+  fetchGameState,
+  placeBet,
+  hit as apiHit,
+  stand as apiStand,
+  newRound,
+  resetGame as apiResetGame,
+  fetchGesture,
+  processGesture
+} from "../api/gameApi";
 
 export const useGameStore = create((set, get) => ({
   deck: [],
@@ -15,81 +19,112 @@ export const useGameStore = create((set, get) => ({
   playerMoney: 1000,
   bet: 0,
   gameState: "idle",
+  controlMode: 'manual',
+  error: null,
+  isLoading: false,
   setBet: (value) => set({ bet: value }),
-  placeBet: () => {
-    const { bet, playerMoney } = get();
-    if (bet >= 1 && bet <= playerMoney) {
-      const deck = shuffleDeck(createDeck());
-      const { dealerHand, playerHand } = dealInitialHands(deck);
+  placeBet: async () => {
+    const { bet } = get();
+    try {
+      set({ isLoading: true, error: null });
+      const gameState = await placeBet(bet);
       set({
-        deck,
-        dealerHand,
-        playerHand,
-        dealerScore: calculateScore(dealerHand),
-        playerScore: calculateScore(playerHand),
-        gameState: "in_progress"
+        ...gameState,
+        isLoading: false
       });
+    } catch (error) {
+      console.error('Error placing bet:', error);
+      set({ isLoading: false, error: error.message });
     }
   },
-  hit: () => {
-    const { deck, playerHand } = get();
-    if (!deck.length) return;
-    const card = deck[0];
-    const newDeck = deck.slice(1);
-    const newPlayerHand = [...playerHand, card];
-    const score = calculateScore(newPlayerHand);
-    set({ deck: newDeck, playerHand: newPlayerHand, playerScore: score });
-    if (score > 21) get().handleRoundOver("dealer");
-  },
-  stand: () => {
-    const { deck, dealerHand } = get();
-    let newDealerHand = [...dealerHand];
-    let newDeck = [...deck];
-    let dealerScore = calculateScore(newDealerHand);
-    while (dealerScore < 17 && newDeck.length > 0) {
-      newDealerHand.push(newDeck[0]);
-      newDeck = newDeck.slice(1);
-      dealerScore = calculateScore(newDealerHand);
+  hit: async () => {
+    try {
+      set({ isLoading: true, error: null });
+      const gameState = await apiHit();
+      set({
+        ...gameState,
+        isLoading: false
+      });
+    } catch (error) {
+      console.error('Error hitting:', error);
+      set({ isLoading: false, error: error.message });
     }
-    set({ dealerHand: newDealerHand, deck: newDeck, dealerScore });
-    get().decideWinner();
   },
-  decideWinner: () => {
-    const { dealerScore, playerScore } = get();
-    if (dealerScore > 21) get().handleRoundOver("player");
-    else if (dealerScore > playerScore) get().handleRoundOver("dealer");
-    else if (dealerScore < playerScore) {
-      if (playerScore <= 21) get().handleRoundOver("player");
-      else get().handleRoundOver("dealer");
-    } else get().handleRoundOver("push");
+  stand: async () => {
+    try {
+      set({ isLoading: true, error: null });
+      const gameState = await apiStand();
+      set({
+        ...gameState,
+        isLoading: false
+      });
+    } catch (error) {
+      console.error('Error standing:', error);
+      set({ isLoading: false, error: error.message });
+    }
   },
-  handleRoundOver: (winner) => {
-    const { playerMoney, bet } = get();
-    if (winner === "player") set({ playerMoney: playerMoney + bet });
-    else if (winner === "dealer") set({ playerMoney: playerMoney - bet });
-    set({ gameState: "round_over" });
+  processGestureCommand: async () => {
+    try {
+      const gesture = await fetchGesture();
+      if (gesture !== 'idle') {
+        set({ isLoading: true, error: null });
+        const gameState = await processGesture(gesture);
+        set({
+          ...gameState,
+          isLoading: false
+        });
+      }
+      return gesture;
+    } catch (error) {
+      console.error('Error processing gesture:', error);
+      set({ isLoading: false, error: error.message });
+      return 'idle';
+    }
   },
-  newRound: () => {
-    set({
-      deck: [],
-      dealerHand: [],
-      playerHand: [],
-      dealerScore: 0,
-      playerScore: 0,
-      bet: 0,
-      gameState: "idle"
-    });
+  newRound: async () => {
+    try {
+      set({ isLoading: true, error: null });
+      const gameState = await newRound();
+      set({
+        ...gameState,
+        isLoading: false
+      });
+    } catch (error) {
+      console.error('Error starting new round:', error);
+      set({ isLoading: false, error: error.message });
+    }
   },
-  resetGame: () => {
-    set({
-      deck: [],
-      dealerHand: [],
-      playerHand: [],
-      dealerScore: 0,
-      playerScore: 0,
-      playerMoney: 1000,
-      bet: 0,
-      gameState: "idle"
-    });
+  resetGame: async () => {
+    try {
+      set({ isLoading: true, error: null });
+      const gameState = await apiResetGame();
+      set({
+        ...gameState,
+        isLoading: false
+      });
+    } catch (error) {
+      console.error('Error resetting game:', error);
+      set({ isLoading: false, error: error.message });
+    }
+  },
+  
+  initializeGame: async () => {
+    try {
+      set({ isLoading: true, error: null });
+      const gameState = await fetchGameState();
+      set({
+        ...gameState,
+        isLoading: false
+      });
+    } catch (error) {
+      console.error('Error initializing game:', error);
+      set({ isLoading: false, error: error.message });
+    }
+  },
+  
+  toggleControlMode: () => {
+    const { controlMode } = get();
+    const newMode = controlMode === 'manual' ? 'gesture' : 'manual';
+    set({ controlMode: newMode });
   }
 }));

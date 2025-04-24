@@ -45,7 +45,7 @@ function HomePage() {
 
         <div className="mt-6 sm:mt-0 text-sm text-gray-300 flex items-center gap-3 bg-black/30 px-4 py-2 rounded-full">
           <span className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span> 
-          <span>Powered by cutting-edge AI</span>
+          <span>Powered by Hand Recognition AI</span>
         </div>
       </motion.div>
       

@@ -4,7 +4,12 @@ router = APIRouter()
 
 @router.get("/")
 def read_root():
-    """
-    Basic root endpoint.
-    """
-    return {"Hello": "World"}
+    return {
+        "api": "Blackjack-GestureAI Game API",
+        "version": "1.0.0",
+        "description": "Backend API for the Blackjack game with gesture recognition integration",
+        "endpoints": {
+            "game": "/game",
+            "docs": "/docs"
+        }
+    }

@@ -1,56 +1,46 @@
-﻿import uvicorn
+import uvicorn
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exception_handlers import http_exception_handler
+from utils.error_handlers import generic_exception_handler
 
-# Import route modules
-from routes.item_routes import router as item_router
-from routes.health_routes import router as health_router
 from routes.root_routes import router as root_router
+from routes.game_routes import router as game_router
 
-# ------------------------------------------------------------------------------
-# Logging Configuration
-# ------------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------------------
-# FastAPI App Initialization
-# ------------------------------------------------------------------------------
 app = FastAPI(
-    title="Blackjack-GestureAI Placeholder API",
-    description="A starter template for demonstration purposes.",
-    version="0.1.0"
+    title="Blackjack-GestureAI Game API",
+    description="API for Blackjack game with gesture recognition integration",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
 
-# ------------------------------------------------------------------------------
-# CORS Middleware
-# ------------------------------------------------------------------------------
+app.add_exception_handler(Exception, generic_exception_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
+
 origins = [
-    "http://localhost:3000",   # React dev server
-    "http://localhost:5173",   # Vite dev server
-    "http://127.0.0.1:5173",   # Local dev URL
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:60882"
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------------------------
-# Register Routers
-# ------------------------------------------------------------------------------
-app.include_router(item_router, prefix="/items", tags=["Items"])
-app.include_router(health_router, prefix="/health", tags=["Utility"])
-app.include_router(root_router, tags=["Utility"])  # root has no prefix
+app.include_router(root_router, tags=["Utility"])
+app.include_router(game_router, prefix="/game", tags=["Game"])
 
-# ------------------------------------------------------------------------------
-# Entry Point for Uvicorn
-# ------------------------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)

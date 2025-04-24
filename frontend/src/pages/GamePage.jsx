@@ -3,12 +3,11 @@ import { useGameStore } from "../store/gameStore";
 import Table from "../components/Table";
 import GestureIndicator from "../components/GestureIndicator";
 import { Link } from "react-router-dom";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 function GamePage() {
   const {
     gameState,
-    startRound,
     placeBet,
     bet,
     setBet,
@@ -16,12 +15,29 @@ function GamePage() {
     stand,
     newRound,
     playerMoney,
-    resetGame
+    resetGame,
+    initializeGame,
+    isLoading,
+    error,
+    controlMode,
+    toggleControlMode
   } = useGameStore();
   
+  const [initializing, setInitializing] = useState(true);
+  
   useEffect(() => {
-    resetGame();
-  }, [resetGame]);
+    const loadInitialState = async () => {
+      try {
+        await initializeGame();
+      } catch (error) {
+        console.error("Failed to initialize game:", error);
+      } finally {
+        setInitializing(false);
+      }
+    };
+    
+    loadInitialState();
+  }, [initializeGame]);
 
   if (playerMoney <= 0) {
     return (
@@ -53,8 +69,53 @@ function GamePage() {
     tap: { scale: 0.95 }
   };
 
+  if (initializing) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[80vh]">
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="bg-black/40 backdrop-blur-md p-8 rounded-xl border border-white/10 shadow-lg text-center"
+        >
+          <div className="flex flex-col items-center gap-4">
+            <div className="w-16 h-16 border-t-2 border-b-2 border-blue-500 rounded-full animate-spin"></div>
+            <p className="text-xl text-gray-300">Loading game...</p>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+  
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[80vh]">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="bg-black/40 backdrop-blur-md p-8 rounded-xl border border-red-500/20 shadow-lg max-w-md w-full text-center"
+        >
+          <h2 className="text-2xl mb-4 font-bold text-red-400">Error</h2>
+          <p className="text-gray-300 mb-6">{error}</p>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={resetGame}
+            className="bg-gradient-to-r from-purple-600 to-blue-600 px-6 py-3 rounded-full text-white font-medium shadow-button"
+          >
+            Try Again
+          </motion.button>
+        </motion.div>
+      </div>
+    );
+  }
+  
   return (
     <div className="flex flex-col items-center min-h-[80vh] p-4 relative">
+      {isLoading && (
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="w-12 h-12 border-t-2 border-b-2 border-blue-500 rounded-full animate-spin"></div>
+        </div>
+      )}
       <motion.div 
         className="w-full flex justify-between items-center mb-8 px-6 py-3"
         variants={headerVariants}
@@ -70,6 +131,35 @@ function GamePage() {
         <div className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-500 px-4 py-2">
           GestureAI Blackjack
         </div>
+        
+        <motion.div 
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.5 }}
+          className="flex items-center gap-3 bg-black/30 px-4 py-2 rounded-full"
+        >
+          <span className="text-xs font-medium text-gray-300">Mode:</span>
+          <button
+            onClick={toggleControlMode}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+              controlMode === 'gesture' ? 'bg-indigo-600' : 'bg-gray-700'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-lg transition-transform ${
+                controlMode === 'gesture' ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+            <span className="sr-only">Toggle Control Mode</span>
+          </button>
+          <span className="text-xs font-medium">
+            {controlMode === 'gesture' ? (
+              <span className="text-indigo-400">Gesture</span>
+            ) : (
+              <span className="text-gray-300">Manual</span>
+            )}
+          </span>
+        </motion.div>
       </motion.div>
       
       <motion.div 
@@ -173,37 +263,81 @@ function GamePage() {
       )}
       
       {gameState === "in_progress" && (
-        <motion.div 
-          className="flex gap-6 mt-6"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.4 }}
-        >
-          <motion.button
-            variants={buttonVariants}
-            whileHover="hover"
-            whileTap="tap"
-            onClick={hit}
-            className="bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-600 hover:to-amber-600 px-10 py-4 rounded-xl font-semibold shadow-button flex items-center gap-3 text-lg"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z" clipRule="evenodd" />
-            </svg>
-            Hit
-          </motion.button>
-          <motion.button
-            variants={buttonVariants}
-            whileHover="hover"
-            whileTap="tap"
-            onClick={stand}
-            className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 px-10 py-4 rounded-xl font-semibold shadow-button flex items-center gap-3 text-lg"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
-            </svg>
-            Stand
-          </motion.button>
-        </motion.div>
+        <>
+          {controlMode === 'manual' && (
+            <motion.div 
+              className="flex gap-6 mt-6"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.4 }}
+            >
+              <motion.button
+                variants={buttonVariants}
+                whileHover="hover"
+                whileTap="tap"
+                onClick={hit}
+                className="bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-600 hover:to-amber-600 px-10 py-4 rounded-xl font-semibold shadow-button flex items-center gap-3 text-lg"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z" clipRule="evenodd" />
+                </svg>
+                Hit
+              </motion.button>
+              <motion.button
+                variants={buttonVariants}
+                whileHover="hover"
+                whileTap="tap"
+                onClick={stand}
+                className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 px-10 py-4 rounded-xl font-semibold shadow-button flex items-center gap-3 text-lg"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+                </svg>
+                Stand
+              </motion.button>
+            </motion.div>
+          )}
+          
+          {controlMode === 'gesture' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.4 }}
+              className="mt-6 px-6 py-5 bg-gradient-to-b from-black/60 to-black/40 backdrop-blur-md rounded-xl border border-indigo-500/30 shadow-lg"
+            >
+              <div className="flex items-center gap-3 justify-center mb-3">
+                <div className="relative">
+                  <div className="absolute inset-0 bg-indigo-500/30 rounded-full animate-ping"></div>
+                  <div className="relative w-3 h-3 bg-indigo-500 rounded-full z-10"></div>
+                </div>
+                <h3 className="text-lg font-semibold text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 to-blue-400">
+                  Gesture Control Active
+                </h3>
+              </div>
+              <div className="flex gap-8 justify-center mb-3 mt-2">
+                <div className="flex flex-col items-center">
+                  <div className="bg-gradient-to-b from-yellow-500/20 to-amber-500/30 p-2 rounded-lg mb-2 shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <span className="text-xs text-yellow-300 font-medium">Hit Gesture</span>
+                </div>
+                <div className="flex flex-col items-center">
+                  <div className="bg-gradient-to-b from-red-500/20 to-pink-500/30 p-2 rounded-lg mb-2 shadow-inner">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <span className="text-xs text-red-300 font-medium">Stand Gesture</span>
+                </div>
+              </div>
+              <p className="text-gray-300 text-sm text-center px-4 pt-1 border-t border-white/5">
+                AI is actively detecting your hand gestures to control the game.
+              </p>
+            </motion.div>
+          )}
+        </>
       )}
       
       {gameState === "round_over" && (
