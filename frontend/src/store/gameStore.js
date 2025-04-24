@@ -18,19 +18,18 @@ export const useGameStore = create((set, get) => ({
   setBet: (value) => set({ bet: value }),
   placeBet: () => {
     const { bet, playerMoney } = get();
-    if (bet >= 1 && bet <= playerMoney) set({ gameState: "bet_placed" });
-  },
-  startRound: () => {
-    const deck = shuffleDeck(createDeck());
-    const { dealerHand, playerHand } = dealInitialHands(deck);
-    set({
-      deck,
-      dealerHand,
-      playerHand,
-      dealerScore: calculateScore(dealerHand),
-      playerScore: calculateScore(playerHand),
-      gameState: "in_progress"
-    });
+    if (bet >= 1 && bet <= playerMoney) {
+      const deck = shuffleDeck(createDeck());
+      const { dealerHand, playerHand } = dealInitialHands(deck);
+      set({
+        deck,
+        dealerHand,
+        playerHand,
+        dealerScore: calculateScore(dealerHand),
+        playerScore: calculateScore(playerHand),
+        gameState: "in_progress"
+      });
+    }
   },
   hit: () => {
     const { deck, playerHand } = get();
@@ -77,6 +76,18 @@ export const useGameStore = create((set, get) => ({
       playerHand: [],
       dealerScore: 0,
       playerScore: 0,
+      bet: 0,
+      gameState: "idle"
+    });
+  },
+  resetGame: () => {
+    set({
+      deck: [],
+      dealerHand: [],
+      playerHand: [],
+      dealerScore: 0,
+      playerScore: 0,
+      playerMoney: 1000,
       bet: 0,
       gameState: "idle"
     });
