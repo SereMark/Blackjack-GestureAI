@@ -2,7 +2,6 @@
 import { AnimatePresence } from "framer-motion";
 import BackgroundSwirls from "./components/BackgroundSwirls";
 import PageWrapper from "./components/PageWrapper";
-import HomePage from "./pages/HomePage";
 import GamePage from "./pages/GamePage";
 
 function AnimatedRoutes() {
@@ -12,14 +11,6 @@ function AnimatedRoutes() {
       <Routes key={location.pathname} location={location}>
         <Route
           path="/"
-          element={
-            <PageWrapper>
-              <HomePage />
-            </PageWrapper>
-          }
-        />
-        <Route
-          path="/game"
           element={
             <PageWrapper>
               <GamePage />

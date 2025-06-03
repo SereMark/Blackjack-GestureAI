@@ -6,12 +6,24 @@ import {
   stand as apiStand,
   newRound,
   resetGame as apiResetGame,
-  fetchGesture,
-  processGesture
 } from "../api/gameApi";
 
+// Utility for async actions
+const createAsyncAction = (apiCall, errorMessage) => async (set, get) => {
+  try {
+    set({ isLoading: true, error: null });
+    const gameState = await apiCall();
+    set({ ...gameState, isLoading: false });
+  } catch (error) {
+    set({ 
+      isLoading: false, 
+      error: error.message || errorMessage 
+    });
+  }
+};
+
 export const useGameStore = create((set, get) => ({
-  deck: [],
+  // Game state
   dealerHand: [],
   playerHand: [],
   dealerScore: 0,
@@ -19,112 +31,63 @@ export const useGameStore = create((set, get) => ({
   playerMoney: 1000,
   bet: 0,
   gameState: "idle",
+  winner: null,
+  message: "",
+  isBlackjack: false,
+  roundsWon: 0,
+  roundsLost: 0,
+  roundsPushed: 0,
+  
+  // UI state
   controlMode: 'manual',
   error: null,
   isLoading: false,
+  
+  // Simple setters
   setBet: (value) => set({ bet: value }),
-  placeBet: async () => {
-    const { bet } = get();
-    try {
-      set({ isLoading: true, error: null });
-      const gameState = await placeBet(bet);
-      set({
-        ...gameState,
-        isLoading: false
-      });
-    } catch (error) {
-      console.error('Error placing bet:', error);
-      set({ isLoading: false, error: error.message });
-    }
-  },
-  hit: async () => {
-    try {
-      set({ isLoading: true, error: null });
-      const gameState = await apiHit();
-      set({
-        ...gameState,
-        isLoading: false
-      });
-    } catch (error) {
-      console.error('Error hitting:', error);
-      set({ isLoading: false, error: error.message });
-    }
-  },
-  stand: async () => {
-    try {
-      set({ isLoading: true, error: null });
-      const gameState = await apiStand();
-      set({
-        ...gameState,
-        isLoading: false
-      });
-    } catch (error) {
-      console.error('Error standing:', error);
-      set({ isLoading: false, error: error.message });
-    }
-  },
-  processGestureCommand: async () => {
-    try {
-      const gesture = await fetchGesture();
-      if (gesture !== 'idle') {
-        set({ isLoading: true, error: null });
-        const gameState = await processGesture(gesture);
-        set({
-          ...gameState,
-          isLoading: false
-        });
-      }
-      return gesture;
-    } catch (error) {
-      console.error('Error processing gesture:', error);
-      set({ isLoading: false, error: error.message });
-      return 'idle';
-    }
-  },
-  newRound: async () => {
-    try {
-      set({ isLoading: true, error: null });
-      const gameState = await newRound();
-      set({
-        ...gameState,
-        isLoading: false
-      });
-    } catch (error) {
-      console.error('Error starting new round:', error);
-      set({ isLoading: false, error: error.message });
-    }
-  },
-  resetGame: async () => {
-    try {
-      set({ isLoading: true, error: null });
-      const gameState = await apiResetGame();
-      set({
-        ...gameState,
-        isLoading: false
-      });
-    } catch (error) {
-      console.error('Error resetting game:', error);
-      set({ isLoading: false, error: error.message });
-    }
-  },
-  
-  initializeGame: async () => {
-    try {
-      set({ isLoading: true, error: null });
-      const gameState = await fetchGameState();
-      set({
-        ...gameState,
-        isLoading: false
-      });
-    } catch (error) {
-      console.error('Error initializing game:', error);
-      set({ isLoading: false, error: error.message });
-    }
-  },
-  
+  clearError: () => set({ error: null }),
   toggleControlMode: () => {
     const { controlMode } = get();
-    const newMode = controlMode === 'manual' ? 'gesture' : 'manual';
-    set({ controlMode: newMode });
-  }
+    set({ controlMode: controlMode === 'manual' ? 'gesture' : 'manual' });
+  },
+  
+  // Bet action with validation
+  placeBet: async () => {
+    const { bet } = get();
+    if (bet <= 0) {
+      set({ error: "Bet amount must be greater than 0" });
+      return;
+    }
+    
+    await createAsyncAction(
+      () => placeBet(bet), 
+      "Failed to place bet. Please try again."
+    )(set, get);
+  },
+  
+  // Game actions
+  hit: () => createAsyncAction(
+    apiHit, 
+    "Failed to hit. Please try again."
+  )(set, get),
+  
+  stand: () => createAsyncAction(
+    apiStand, 
+    "Failed to stand. Please try again."
+  )(set, get),
+  
+  newRound: () => createAsyncAction(
+    newRound, 
+    "Failed to start new round. Please try again."
+  )(set, get),
+  
+  resetGame: () => createAsyncAction(
+    apiResetGame, 
+    "Failed to reset game. Please try again."
+  )(set, get),
+  
+  initializeGame: () => createAsyncAction(
+    fetchGameState, 
+    "Failed to initialize game. Please check your connection."
+  )(set, get),
 }));

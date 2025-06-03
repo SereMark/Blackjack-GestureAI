@@ -1,9 +1,10 @@
 import { motion } from "framer-motion";
+import { memo } from "react";
 
-function Card({ rank, suit, hidden }) {
+const Card = memo(function Card({ rank, suit, hidden }) {
   const color = suit === "hearts" || suit === "diamonds" ? "text-red-600" : "text-black";
   
-  let symbol =
+  const symbol = 
     suit === "hearts" ? "♥"
     : suit === "diamonds" ? "♦"
     : suit === "clubs" ? "♣"
@@ -52,6 +53,6 @@ function Card({ rank, suit, hidden }) {
       </div>
     </motion.div>
   );
-}
+});
 
 export default Card;
