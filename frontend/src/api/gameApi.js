@@ -163,6 +163,56 @@ export const fetchGestureData = async () => {
   }
 };
 
+export const switchMode = async (mode) => {
+  try {
+    // Use a short timeout for mode switching to prevent hanging
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    };
+
+    // Add session ID to headers if available
+    const currentSessionId = getSessionId();
+    if (currentSessionId) {
+      headers['X-Session-ID'] = currentSessionId;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+    const options = {
+      method: 'POST',
+      headers,
+      mode: 'cors',
+      credentials: 'include',
+      signal: controller.signal
+    };
+
+    const response = await fetch(`${API_BASE_URL}/game/mode/${mode}`, options);
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      let errorDetail;
+      try {
+        const errorData = await response.json();
+        errorDetail = errorData.detail || `HTTP ${response.status}: ${response.statusText}`;
+      } catch (e) {
+        errorDetail = `HTTP ${response.status}: ${response.statusText}`;
+      }
+      throw new Error(errorDetail);
+    }
+
+    const data = await response.json();
+    return data;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Mode switch timed out. Please try again.');
+    }
+    console.error('Error switching mode:', error);
+    throw error;
+  }
+};
+
 // Utility functions
 export const clearSession = () => setSessionId(null);
 

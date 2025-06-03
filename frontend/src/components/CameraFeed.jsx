@@ -70,7 +70,20 @@ function CameraFeed() {
     let mounted = true;
     let interval = null;
     
+    // Clear processing state immediately when switching modes
+    if (controlMode === 'manual') {
+      setIsProcessing(false);
+      setGestureData({
+        gesture: "idle",
+        confidence: 0,
+        isConfident: false,
+        quality: "poor",
+        status: "idle"
+      });
+    }
+    
     if (controlMode === 'gesture' && isStreamActive) {
+      console.log('Starting gesture polling...');
       interval = setInterval(async () => {
         if (gameState === "in_progress" && mounted) {
           try {
@@ -100,19 +113,14 @@ function CameraFeed() {
           }
         }
       }, 1500);
-    } else {
-      setGestureData({
-        gesture: "idle",
-        confidence: 0,
-        isConfident: false,
-        quality: "poor",
-        status: "idle"
-      });
     }
     
     return () => {
       mounted = false;
-      if (interval) clearInterval(interval);
+      if (interval) {
+        console.log('Clearing gesture polling interval');
+        clearInterval(interval);
+      }
     };
   }, [hit, stand, gameState, controlMode, isStreamActive, isProcessing]);
 

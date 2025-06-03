@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, HTTPException, status, Request, Response
 import secrets
+import asyncio
 
 from models.game_models import GameState, BetRequest
 from services.game_service import (
@@ -12,7 +13,7 @@ from services.game_service import (
     new_round,
     reset_game
 )
-from services.gesture_service import get_current_gesture, reset_gesture_detector
+from services.gesture_service import get_current_gesture, reset_gesture_detector, get_gesture_detector_state
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -250,3 +251,55 @@ async def get_gesture():
             "is_confident": False,
             "status": "error"
         }
+
+@router.post("/mode/{mode}")
+async def switch_mode(mode: str, request: Request, response: Response):
+    """
+    Switch between manual and gesture control modes.
+    Resets gesture detector state when switching to ensure clean state.
+    """
+    try:
+        session_id = get_or_create_session_id(request, response)
+        
+        if mode not in ["manual", "gesture"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid mode. Must be 'manual' or 'gesture'"
+            )
+        
+        # Give any ongoing gesture operations a moment to complete
+        await asyncio.sleep(0.1)
+        
+        # Reset gesture detector when switching modes to prevent state issues
+        try:
+            reset_gesture_detector()
+            detector_reset_success = True
+        except Exception as reset_error:
+            logger.warning(f"Gesture detector reset failed: {reset_error}")
+            detector_reset_success = False
+        
+        # Get the detector state after reset for verification
+        try:
+            detector_state = get_gesture_detector_state()
+        except Exception as state_error:
+            logger.warning(f"Could not get detector state: {state_error}")
+            detector_state = {"error": "Could not retrieve state"}
+        
+        logger.info(f"Mode switched to '{mode}' for session {session_id[:8]}... - Gesture detector reset: {detector_reset_success}")
+        
+        return {
+            "mode": mode,
+            "status": "success",
+            "message": f"Switched to {mode} mode",
+            "gesture_detector_reset": detector_reset_success,
+            "detector_state": detector_state
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error switching mode: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to switch mode"
+        )

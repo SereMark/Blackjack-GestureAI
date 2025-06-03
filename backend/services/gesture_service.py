@@ -12,6 +12,7 @@ class GestureDetector:
         self.gesture_confidence = 0.0
         self.last_detection_time = time.time()
         self.lock = threading.Lock()
+        self._resetting = False  # Flag to indicate reset in progress
         
         # Gesture simulation parameters
         self.gesture_weights = {
@@ -30,16 +31,21 @@ class GestureDetector:
 
     def _update_gesture_history(self, gesture: str, confidence: float):
         """Update gesture history for more realistic patterns."""
-        with self.lock:
-            self.gesture_history.append({
-                "gesture": gesture,
-                "confidence": confidence,
-                "timestamp": time.time()
-            })
+        # Skip if reset is in progress
+        if self._resetting:
+            return
             
-            # Keep only recent history
-            if len(self.gesture_history) > self.max_history_length:
-                self.gesture_history.pop(0)
+        # We're already holding the main lock when this is called from detect_gesture
+        # So we don't need to acquire it again, this prevents potential deadlock
+        self.gesture_history.append({
+            "gesture": gesture,
+            "confidence": confidence,
+            "timestamp": time.time()
+        })
+        
+        # Keep only recent history
+        if len(self.gesture_history) > self.max_history_length:
+            self.gesture_history.pop(0)
 
     def _calculate_smoothed_confidence(self, base_confidence: float, gesture: str) -> float:
         """Calculate confidence with smoothing based on history."""
@@ -62,9 +68,24 @@ class GestureDetector:
         Returns:
             tuple: (gesture, confidence_score)
         """
+        # Quick check if reset is in progress, return idle immediately
+        if self._resetting:
+            return "idle", 0.0
+            
         current_time = time.time()
         
-        with self.lock:
+        # Try to acquire lock with timeout to prevent hanging
+        lock_acquired = self.lock.acquire(timeout=1.0)
+        
+        if not lock_acquired or self._resetting:
+            # If we can't get the lock or reset is in progress, return idle
+            return "idle", 0.0
+            
+        try:
+            # Double-check reset flag after acquiring lock
+            if self._resetting:
+                return "idle", 0.0
+                
             # Gesture persistence, don't change too frequently
             time_since_last = current_time - self.last_detection_time
             
@@ -99,6 +120,9 @@ class GestureDetector:
             logger.debug(f"Detected gesture: {detected_gesture} (confidence: {final_confidence:.2f})")
             
             return detected_gesture, final_confidence
+            
+        finally:
+            self.lock.release()
 
     def is_confident_gesture(self, min_confidence: float = 0.8) -> bool:
         """Check if current gesture detection is confident enough to act upon."""
@@ -119,12 +143,49 @@ class GestureDetector:
 
     def reset(self):
         """Reset the detector state."""
-        with self.lock:
-            self.last_gesture = "idle"
-            self.gesture_confidence = 0.0
-            self.last_detection_time = time.time()
-            self.gesture_history.clear()
-            logger.info("Gesture detector reset")
+        # Set resetting flag first (this is thread-safe for simple assignments)
+        self._resetting = True
+        
+        try:
+            # Try to acquire lock with timeout to prevent deadlocks
+            lock_acquired = self.lock.acquire(timeout=2.0)
+            
+            if lock_acquired:
+                try:
+                    self.last_gesture = "idle"
+                    self.gesture_confidence = 0.0
+                    self.last_detection_time = time.time()
+                    self.gesture_history.clear()
+                    logger.info("Gesture detector reset successfully")
+                finally:
+                    self.lock.release()
+            else:
+                # Force reset if lock acquisition fails
+                logger.warning("Could not acquire lock for reset, forcing reset")
+                self.last_gesture = "idle"
+                self.gesture_confidence = 0.0
+                self.last_detection_time = time.time()
+                self.gesture_history.clear()
+                logger.info("Gesture detector force reset completed")
+        finally:
+            # Always clear the resetting flag
+            self._resetting = False
+
+    def is_clean_state(self) -> bool:
+        """Check if detector is in a clean/idle state."""
+        # Try to acquire lock with timeout
+        lock_acquired = self.lock.acquire(timeout=1.0)
+        
+        if not lock_acquired:
+            # If we can't get the lock, assume not clean
+            return False
+            
+        try:
+            return (self.last_gesture == "idle" and 
+                    self.gesture_confidence == 0.0 and 
+                    len(self.gesture_history) == 0)
+        finally:
+            self.lock.release()
 
 # Global gesture detector instance
 _gesture_detector = GestureDetector()
@@ -152,6 +213,17 @@ def reset_gesture_detector():
     global _gesture_detector
     _gesture_detector.reset()
     logger.info("Gesture detector reset by external request")
+
+def get_gesture_detector_state() -> Dict[str, Any]:
+    """Get current state of the gesture detector for debugging."""
+    global _gesture_detector
+    return {
+        "last_gesture": _gesture_detector.last_gesture,
+        "confidence": _gesture_detector.gesture_confidence,
+        "is_clean_state": _gesture_detector.is_clean_state(),
+        "history_length": len(_gesture_detector.gesture_history),
+        "last_detection_time": _gesture_detector.last_detection_time
+    }
 
 def get_gesture_statistics() -> Dict[str, Any]:
     """Get statistics about gesture detection performance."""
