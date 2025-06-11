@@ -32,7 +32,7 @@
     "type": "git",
     "url": "https://github.com/SereMark/Blackjack-GestureAI.git"
   },
-  "keywords": ["Blackjack", "React", "Vite", "GestureAI"],
+  "keywords": ["Blackjack", "React", "Vite", "AI"],
   "author": "Sere Gergő Márk, Lázár Máté",
   "license": "ISC",
   "bugs": {
