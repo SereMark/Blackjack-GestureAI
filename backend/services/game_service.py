@@ -384,25 +384,3 @@ def reset_game(session_id: str) -> Dict[str, Any]:
         }
         
         return dict(_games[session_id])
-
-def cleanup_old_sessions(max_age_hours: int = 24) -> int:
-    """Clean up old inactive sessions to prevent memory leaks."""
-    current_time = time.time()
-    max_age_seconds = max_age_hours * 3600
-    sessions_cleaned = 0
-    
-    with _games_lock:
-        sessions_to_remove = []
-        for session_id, game in _games.items():
-            if current_time - game.get("lastActivity", 0) > max_age_seconds:
-                sessions_to_remove.append(session_id)
-        
-        for session_id in sessions_to_remove:
-            del _games[session_id]
-            sessions_cleaned += 1
-            logger.info(f"Cleaned up old session: {session_id[:8]}")
-    
-    if sessions_cleaned > 0:
-        logger.info(f"Cleaned up {sessions_cleaned} old sessions")
-    
-    return sessions_cleaned
