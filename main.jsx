@@ -1,4 +1,4 @@
-﻿import React, { memo, useEffect, useState, useRef, useCallback } from "react";
+﻿import React, { memo, useEffect, useState, useRef, useCallback, useMemo } from "react";
 import ReactDOM from "react-dom/client";
 import { motion, AnimatePresence } from "framer-motion";
 import { createWithEqualityFn } from 'zustand/traditional';
@@ -11,10 +11,19 @@ import {
 
 // --- CONSTANTS --- //
 const CONSTANTS = {
-  ACTION_DELAY_MS: 600,
-  DEALER_DELAY_MS: 1000,
-  DEALER_STANDS_ON: 17,
-  BLACKJACK_SCORE: 21,
+  TIMINGS: {
+    ACTION_DELAY_MS: 500,
+    DEALER_DELAY_MS: 800,
+    END_ROUND_DELAY_MS: 1000,
+  },
+  GAME_RULES: {
+    DEALER_STANDS_ON: 17,
+    BLACKJACK_SCORE: 21,
+  },
+  DEFAULTS: {
+    PLAYER_MONEY: 1000,
+    BET_AMOUNT: 50,
+  },
   GAME_STATES: {
     IDLE: "idle",
     IN_PROGRESS: "in_progress",
@@ -33,29 +42,43 @@ const CONSTANTS = {
     MANUAL: "manual",
     GESTURE: "gesture",
   },
-  CARD_SUITS: ["hearts", "diamonds", "clubs", "spades"],
-  CARD_RANKS: ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"],
-  GESTURE_MAP: {
-    'Open_Palm': 'hit',
-    'Thumb_Up': 'hit',
-    'ILoveYou': 'hit',
-    'Closed_Fist': 'stand',
-    'Victory': 'stand',
-    'Thumb_Down': 'stand',
-    'Pointing_Up': 'stand'
+  CARDS: {
+    SUITS: ["hearts", "diamonds", "clubs", "spades"],
+    RANKS: ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"],
   },
-  MODEL_PATH: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+  GESTURE: {
+    MAP: {
+      'Open_Palm': 'hit',
+      'Thumb_Up': 'hit',
+      'ILoveYou': 'hit',
+      'Closed_Fist': 'stand',
+      'Victory': 'stand',
+      'Thumb_Down': 'stand',
+      'Pointing_Up': 'stand'
+    },
+    CONFIDENCE_THRESHOLD: 0.8,
+    ACTION_COOLDOWN_MS: 2000,
+  },
+  API: {
+    MODEL_PATH: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+    WASM_BASE: "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/wasm",
+  },
 };
 
 // --- GAME LOGIC UTILITIES --- //
 
+/**
+ * Creates and shuffles a standard 52-card deck.
+ * @returns {Array<Object>} A shuffled array of card objects.
+ */
 const createDeck = () => {
   const deck = [];
-  for (const suit of CONSTANTS.CARD_SUITS) {
-    for (const rank of CONSTANTS.CARD_RANKS) {
+  for (const suit of CONSTANTS.CARDS.SUITS) {
+    for (const rank of CONSTANTS.CARDS.RANKS) {
       deck.push({ rank, suit, id: `${rank}-${suit}` });
     }
   }
+  // Fisher-Yates shuffle algorithm for an unbiased shuffle.
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -63,15 +86,20 @@ const createDeck = () => {
   return deck;
 };
 
+/**
+ * Calculates the score of a given hand of cards, handling Aces correctly.
+ * @param {Array<Object>} hand - An array of card objects.
+ * @returns {number} The calculated score of the hand.
+ */
 const calculateScore = (hand) => {
   if (!hand?.length) return 0;
 
   let score = 0;
-  let aces = 0;
+  let aceCount = 0;
   
   for (const card of hand) {
     if (card.rank === "A") {
-      aces += 1;
+      aceCount += 1;
       score += 11;
     } else if (["K", "Q", "J"].includes(card.rank)) {
       score += 10;
@@ -80,31 +108,37 @@ const calculateScore = (hand) => {
     }
   }
   
-  while (score > CONSTANTS.BLACKJACK_SCORE && aces > 0) {
+  // Adjust for Aces if the score is over 21
+  while (score > CONSTANTS.GAME_RULES.BLACKJACK_SCORE && aceCount > 0) {
     score -= 10;
-    aces -= 1;
+    aceCount -= 1;
   }
   
   return score;
 };
 
 // --- HOOKS --- //
+/**
+ * A declarative timeout hook that automatically handles cleanup.
+ * @returns {function(function, number): void} A function to set a timeout.
+ */
 function useTimeout() {
-  const id = useRef();
-  useEffect(() => () => clearTimeout(id.current), []);
+  const timeoutId = useRef();
+  useEffect(() => () => clearTimeout(timeoutId.current), []);
   return useCallback((fn, ms) => {
-    clearTimeout(id.current);
-    id.current = setTimeout(fn, ms);
+    clearTimeout(timeoutId.current);
+    timeoutId.current = setTimeout(fn, ms);
   }, []);
 }
 
 // --- ZUSTAND GAME STORE --- //
 const useGameStore = createWithEqualityFn((set, get) => ({
+  // State
   deck: [],
   dealerHand: [],
   playerHand: [],
-  playerMoney: 1000,
-  bet: 50,
+  playerMoney: CONSTANTS.DEFAULTS.PLAYER_MONEY,
+  bet: CONSTANTS.DEFAULTS.BET_AMOUNT,
   roundsWon: 0,
   roundsLost: 0,
   roundsPushed: 0,
@@ -116,63 +150,80 @@ const useGameStore = createWithEqualityFn((set, get) => ({
   isLoading: false,
   isDealerTurn: false,
   
-  setBet: (value) => set(state => {
+  // Actions
+  /** Sets the player's bet amount, clamping it between 0 and player's total money. */
+  setBet: (value) => {
     const numValue = parseInt(value, 10);
-    if (isNaN(numValue)) return {};
-    return { bet: Math.min(Math.max(0, numValue), state.playerMoney) };
-  }),
+    if (isNaN(numValue)) return;
+    set(state => ({ bet: Math.min(Math.max(0, numValue), state.playerMoney) }));
+  },
   
+  /** Clears any active error message. */
   clearError: () => set({ error: null }),
   
+  /** Toggles the control mode between Manual and Gesture. */
   toggleControlMode: () => set(state => ({
     controlMode: state.controlMode === CONSTANTS.CONTROL_MODES.MANUAL 
       ? CONSTANTS.CONTROL_MODES.GESTURE 
       : CONSTANTS.CONTROL_MODES.MANUAL
   })),
   
+  /** Places the bet and starts a new round by dealing cards. */
   placeBet: () => {
     const { bet, playerMoney, isLoading, gameState } = get();
     if (isLoading || gameState !== CONSTANTS.GAME_STATES.IDLE) return;
     if (bet <= 0) return set({ error: "Please enter a positive bet amount." });
     if (bet > playerMoney) return set({ error: "Insufficient funds." });
+
     set({ isLoading: true, error: null });
+    
     setTimeout(() => {
-      const deck = createDeck();
-      const playerHand = [deck.pop(), deck.pop()];
-      const dealerHand = [deck.pop(), deck.pop()];
+      const newDeck = createDeck();
+      const playerHand = [newDeck.pop(), newDeck.pop()];
+      const dealerHand = [newDeck.pop(), newDeck.pop()];
+      
       const playerScore = calculateScore(playerHand);
       const dealerScore = calculateScore(dealerHand);
-      const playerHasBlackjack = playerScore === CONSTANTS.BLACKJACK_SCORE;
-      const dealerHasBlackjack = dealerScore === CONSTANTS.BLACKJACK_SCORE;
+      
+      const playerHasBlackjack = playerScore === CONSTANTS.GAME_RULES.BLACKJACK_SCORE;
+      const dealerHasBlackjack = dealerScore === CONSTANTS.GAME_RULES.BLACKJACK_SCORE;
+
       set({
-        deck, playerHand, dealerHand,
+        deck: newDeck, playerHand, dealerHand,
         gameState: CONSTANTS.GAME_STATES.IN_PROGRESS,
         winner: null,
         message: "Game in progress. Hit or Stand?",
         isDealerTurn: false,
-        isLoading: false
+        isLoading: false,
       });
+
+      // If the round ends immediately (e.g., Blackjack), call endRound.
       if (playerHasBlackjack || dealerHasBlackjack) {
-        setTimeout(() => get().endRound(), 1000);
+        setTimeout(() => get().endRound(), CONSTANTS.TIMINGS.END_ROUND_DELAY_MS);
       }
-    }, CONSTANTS.ACTION_DELAY_MS);
+    }, CONSTANTS.TIMINGS.ACTION_DELAY_MS);
   },
   
+  /** Deals one card to the player. Automatically stands if player busts or hits 21. */
   hit: () => {
-    const state = get();
-    if (state.isLoading || state.gameState !== CONSTANTS.GAME_STATES.IN_PROGRESS || state.isDealerTurn) return;
+    const { isLoading, gameState, isDealerTurn } = get();
+    if (isLoading || gameState !== CONSTANTS.GAME_STATES.IN_PROGRESS || isDealerTurn) return;
+
     set({ isLoading: true });
     setTimeout(() => {
-      const deck = [...state.deck];
-      const playerHand = [...state.playerHand, deck.pop()];
-      const playerScore = calculateScore(playerHand);
-      set({ deck, playerHand, isLoading: false });
-      if (playerScore >= CONSTANTS.BLACKJACK_SCORE) {
-        setTimeout(() => get().stand(), 500);
+      const newDeck = [...get().deck];
+      const newPlayerHand = [...get().playerHand, newDeck.pop()];
+      const playerScore = calculateScore(newPlayerHand);
+      
+      set({ deck: newDeck, playerHand: newPlayerHand, isLoading: false });
+      
+      if (playerScore >= CONSTANTS.GAME_RULES.BLACKJACK_SCORE) {
+        setTimeout(() => get().stand(), CONSTANTS.TIMINGS.ACTION_DELAY_MS);
       }
-    }, CONSTANTS.ACTION_DELAY_MS);
+    }, CONSTANTS.TIMINGS.ACTION_DELAY_MS);
   },
   
+  /** Ends the player's turn and initiates the dealer's turn. */
   stand: () => {
     const { isLoading, gameState, isDealerTurn } = get();
     if (isLoading || gameState !== CONSTANTS.GAME_STATES.IN_PROGRESS || isDealerTurn) return;
@@ -183,8 +234,8 @@ const useGameStore = createWithEqualityFn((set, get) => ({
       let currentDeck = [...get().deck];
       let currentDealerHand = [...get().dealerHand];
       
-      while (calculateScore(currentDealerHand) < CONSTANTS.DEALER_STANDS_ON) {
-        await new Promise(resolve => setTimeout(resolve, CONSTANTS.DEALER_DELAY_MS));
+      while (calculateScore(currentDealerHand) < CONSTANTS.GAME_RULES.DEALER_STANDS_ON) {
+        await new Promise(resolve => setTimeout(resolve, CONSTANTS.TIMINGS.DEALER_DELAY_MS));
         const newCard = currentDeck.pop();
         currentDealerHand = [...currentDealerHand, newCard];
         set({ deck: [...currentDeck], dealerHand: [...currentDealerHand] });
@@ -195,10 +246,11 @@ const useGameStore = createWithEqualityFn((set, get) => ({
     
     dealerPlay().catch(error => {
       console.error("Dealer play error:", error);
-      set({ error: "An error occurred during dealer's turn.", isLoading: false });
+      set({ error: "An error occurred during the dealer's turn.", isLoading: false });
     });
   },
   
+  /** Determines the winner, updates scores and money, and ends the round. */
   endRound: () => {
     const { playerHand, dealerHand, bet, playerMoney } = get();
     const playerScore = calculateScore(playerHand);
@@ -206,17 +258,13 @@ const useGameStore = createWithEqualityFn((set, get) => ({
     
     let winner, message, moneyChange = 0;
     
-    const playerHasBlackjack = playerScore === CONSTANTS.BLACKJACK_SCORE && playerHand.length === 2;
-    const dealerHasBlackjack = dealerScore === CONSTANTS.BLACKJACK_SCORE && dealerHand.length === 2;
+    const playerHasBlackjack = playerScore === CONSTANTS.GAME_RULES.BLACKJACK_SCORE && playerHand.length === 2;
+    const dealerHasBlackjack = dealerScore === CONSTANTS.GAME_RULES.BLACKJACK_SCORE && dealerHand.length === 2;
 
-    if (playerScore > CONSTANTS.BLACKJACK_SCORE) {
+    if (playerScore > CONSTANTS.GAME_RULES.BLACKJACK_SCORE) {
       winner = CONSTANTS.WINNER_TYPES.DEALER;
-      message = `Bust! You went over with ${playerScore}.`;
+      message = `Bust! You lose with ${playerScore}.`;
       moneyChange = -bet;
-    } else if (dealerScore > CONSTANTS.BLACKJACK_SCORE) {
-      winner = CONSTANTS.WINNER_TYPES.PLAYER;
-      message = `Dealer busts with ${dealerScore}! You win!`;
-      moneyChange = bet;
     } else if (playerHasBlackjack && !dealerHasBlackjack) {
       winner = CONSTANTS.WINNER_TYPES.PLAYER;
       message = "Blackjack! You win 3:2!";
@@ -225,6 +273,10 @@ const useGameStore = createWithEqualityFn((set, get) => ({
       winner = CONSTANTS.WINNER_TYPES.DEALER;
       message = "Dealer has Blackjack! You lose.";
       moneyChange = -bet;
+    } else if (dealerScore > CONSTANTS.GAME_RULES.BLACKJACK_SCORE) {
+      winner = CONSTANTS.WINNER_TYPES.PLAYER;
+      message = `Dealer busts with ${dealerScore}! You win!`;
+      moneyChange = bet;
     } else if (playerScore > dealerScore) {
       winner = CONSTANTS.WINNER_TYPES.PLAYER;
       message = `You win! ${playerScore} beats ${dealerScore}.`;
@@ -237,19 +289,24 @@ const useGameStore = createWithEqualityFn((set, get) => ({
       winner = CONSTANTS.WINNER_TYPES.PUSH;
       message = `Push! Both have ${playerScore}.`;
     }
+
+    const won = winner === CONSTANTS.WINNER_TYPES.PLAYER ? 1 : 0;
+    const lost = winner === CONSTANTS.WINNER_TYPES.DEALER ? 1 : 0;
+    const pushed = winner === CONSTANTS.WINNER_TYPES.PUSH ? 1 : 0;
     
     set(state => ({
       winner, message,
       playerMoney: state.playerMoney + moneyChange,
-      roundsWon: state.roundsWon + (winner === CONSTANTS.WINNER_TYPES.PLAYER ? 1 : 0),
-      roundsLost: state.roundsLost + (winner === CONSTANTS.WINNER_TYPES.DEALER ? 1 : 0),
-      roundsPushed: state.roundsPushed + (winner === CONSTANTS.WINNER_TYPES.PUSH ? 1 : 0),
+      roundsWon: state.roundsWon + won,
+      roundsLost: state.roundsLost + lost,
+      roundsPushed: state.roundsPushed + pushed,
       gameState: CONSTANTS.GAME_STATES.ROUND_OVER,
       isLoading: false,
       isDealerTurn: true,
     }));
   },
   
+  /** Prepares the game for a new round without resetting scores. */
   newRound: () => {
     const { isLoading, playerMoney, bet } = get();
     if (isLoading) return;
@@ -266,9 +323,11 @@ const useGameStore = createWithEqualityFn((set, get) => ({
     });
   },
   
+  /** Resets the entire game state to its initial values. */
   resetGame: () => set({
     deck: [], dealerHand: [], playerHand: [],
-    playerMoney: 1000, bet: 50,
+    playerMoney: CONSTANTS.DEFAULTS.PLAYER_MONEY,
+    bet: CONSTANTS.DEFAULTS.BET_AMOUNT,
     roundsWon: 0, roundsLost: 0, roundsPushed: 0,
     gameState: CONSTANTS.GAME_STATES.IDLE,
     winner: null,
@@ -296,15 +355,9 @@ const Card = memo(({ rank, suit, isHidden }) => {
       >
         {/* Card Front */}
         <div className={`absolute inset-0 bg-white rounded-lg shadow-lg p-1.5 ${color} flex flex-col justify-between`} style={{ backfaceVisibility: 'hidden' }}>
-          <div className="text-left">
-            <div className="font-bold text-lg leading-none">{rank}</div>
-            <div className="text-sm leading-none">{symbol}</div>
-          </div>
+          <div className="text-left"><div className="font-bold text-lg leading-none">{rank}</div><div className="text-sm leading-none">{symbol}</div></div>
           <div className="text-center text-4xl">{symbol}</div>
-          <div className="text-right rotate-180">
-            <div className="font-bold text-lg leading-none">{rank}</div>
-            <div className="text-sm leading-none">{symbol}</div>
-          </div>
+          <div className="text-right rotate-180"><div className="font-bold text-lg leading-none">{rank}</div><div className="text-sm leading-none">{symbol}</div></div>
         </div>
         
         {/* Card Back */}
@@ -357,16 +410,13 @@ const Hand = memo(({ cards, playerType }) => {
   );
 });
 
-const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/wasm";
-
 const CameraFeed = memo(() => {
   const videoRef = useRef(null);
   const recognizerRef = useRef(null);
   const lastActionTimeRef = useRef(0);
-  const canvasRef = useRef(null);
   const frameIdRef = useRef();
   
-  const [cameraStatus, setCameraStatus] = useState('initializing');
+  const [cameraStatus, setCameraStatus] = useState('initializing'); // 'initializing', 'active', 'denied', 'unavailable', 'error'
   const [gestureInfo, setGestureInfo] = useState({ gesture: 'None', confidence: 0 });
   const [recognizerReady, setRecognizerReady] = useState(false);
   
@@ -390,63 +440,53 @@ const CameraFeed = memo(() => {
       return;
     }
 
-    fetch(`${WASM_BASE}/vision_wasm_internal.js`, { cache: "force-cache" })
-      .catch(() => {});
+    // Pre-fetch WASM assets to potentially speed up initialization
+    fetch(`${CONSTANTS.API.WASM_BASE}/vision_wasm_internal.js`, { cache: "force-cache" }).catch(() => {});
 
-    const abort = new AbortController();
-    let cancelled = false;
-    let recognizer;
+    const abortController = new AbortController();
+    let isCancelled = false;
 
-    async function initCameraAndRecognizer() {
+    async function init() {
+      // 1. Initialize Camera
       try {
-        const constraints = { video: { facingMode: "user" }, signal: abort.signal };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        if (videoRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" }, signal: abortController.signal });
+        if (videoRef.current && !isCancelled) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
           setCameraStatus("active");
         }
       } catch (err) {
+        if (err.name === "AbortError") return;
         console.error("Camera Error:", err.name, err.message);
-        switch (err.name) {
-          case "NotAllowedError":
-          case "SecurityError":
-            setCameraStatus("denied");
-            break;
-          case "NotFoundError":
-          case "OverconstrainedError":
-          case "NotReadableError":
-            setCameraStatus("unavailable");
-            break;
-          default:
-            setCameraStatus("error");
-        }
+        setCameraStatus(err.name === "NotAllowedError" || err.name === "SecurityError" ? "denied" : "unavailable");
       }
+
+      // 2. Initialize Gesture Recognizer
       try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_BASE);
-        recognizer = await GestureRecognizer.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: CONSTANTS.MODEL_PATH, delegate: "GPU" },
-          runningMode: "VIDEO",
-          numHands: 1
+        const vision = await FilesetResolver.forVisionTasks(CONSTANTS.API.WASM_BASE);
+        const recognizer = await GestureRecognizer.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: CONSTANTS.API.MODEL_PATH, delegate: "GPU" },
+          runningMode: "VIDEO", numHands: 1
         });
         recognizerRef.current = recognizer;
-        if (!cancelled) {
+        if (!isCancelled) {
           setRecognizerReady(true);
           setGestureInfo({ gesture: "Ready", confidence: 0 });
         }
       } catch (e) {
-        if (!cancelled) {
+        if (!isCancelled) {
           console.error("Recognizer init error:", e);
           setCameraStatus("error");
         }
       }
     }
-    initCameraAndRecognizer();
+    
+    init();
 
     return () => {
-      abort.abort();
-      cancelled = true;
-      if (recognizer?.close) recognizer.close();
+      isCancelled = true;
+      abortController.abort();
+      recognizerRef.current?.close();
       if (videoRef.current?.srcObject) {
         videoRef.current.srcObject.getTracks().forEach(track => track.stop());
         videoRef.current.srcObject = null;
@@ -455,14 +495,18 @@ const CameraFeed = memo(() => {
   }, [isGestureControlActive]);
   
   const handleGestureResult = useCallback((result) => {
-    const gesture = result.gestures[0][0];
+    const gesture = result.gestures[0]?.[0];
+    if (!gesture) return;
+
     setGestureInfo({ gesture: gesture.categoryName, confidence: gesture.score });
-    const action = CONSTANTS.GESTURE_MAP[gesture.categoryName];
+    const action = CONSTANTS.GESTURE.MAP[gesture.categoryName];
     const now = Date.now();
+
     const canPerformAction = action &&
-      gesture.score > 0.8 &&
-      (now - lastActionTimeRef.current > 2000) &&
+      gesture.score > CONSTANTS.GESTURE.CONFIDENCE_THRESHOLD &&
+      (now - lastActionTimeRef.current > CONSTANTS.GESTURE.ACTION_COOLDOWN_MS) &&
       gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !isLoading;
+      
     if (canPerformAction) {
       lastActionTimeRef.current = now;
       if (action === 'hit') hit();
@@ -471,41 +515,44 @@ const CameraFeed = memo(() => {
   }, [gameState, isLoading, hit, stand]);
   
   useEffect(() => {
-    if (!recognizerReady || !isGestureControlActive) return;
-    if (!canvasRef.current) {
-      canvasRef.current = document.createElement('canvas');
-      canvasRef.current.width = 640;
-      canvasRef.current.height = 480;
-    }
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    let frameId;
-    const processFrame = async (now, metadata) => {
-      if (videoRef.current && videoRef.current.readyState >= 2 && recognizerRef.current) {
-        ctx.drawImage(videoRef.current, 0, 0, 640, 480);
-        const imageData = ctx.getImageData(0, 0, 640, 480);
-        try {
-          const result = await recognizerRef.current.recognizeForVideo(imageData, metadata.presentedFrames);
-          if (result?.gestures?.length) handleGestureResult(result);
-        } catch (e) {}
+    if (!recognizerReady || !isGestureControlActive || !videoRef.current) return;
+    
+    let lastVideoTime = -1;
+    const renderLoop = (now, metadata) => {
+      if (videoRef.current.readyState < 2) {
+        frameIdRef.current = videoRef.current.requestVideoFrameCallback(renderLoop);
+        return;
       }
-      frameId = videoRef.current.requestVideoFrameCallback(processFrame);
-      frameIdRef.current = frameId;
+      if (metadata.mediaTime !== lastVideoTime) {
+        const result = recognizerRef.current.recognizeForVideo(videoRef.current, now);
+        if (result?.gestures?.length) {
+          handleGestureResult(result);
+        }
+        lastVideoTime = metadata.mediaTime;
+      }
+      frameIdRef.current = videoRef.current.requestVideoFrameCallback(renderLoop);
     };
-    frameId = videoRef.current.requestVideoFrameCallback(processFrame);
-    frameIdRef.current = frameId;
+
+    frameIdRef.current = videoRef.current.requestVideoFrameCallback(renderLoop);
+    
     return () => {
       if (videoRef.current && frameIdRef.current) {
         videoRef.current.cancelVideoFrameCallback(frameIdRef.current);
       }
     };
   }, [recognizerReady, isGestureControlActive, handleGestureResult]);
+
+  const gestureHintText = useMemo(() => {
+      const hitGestures = Object.entries(CONSTANTS.GESTURE.MAP).filter(([,v]) => v === 'hit').map(([k]) => k.replace(/_/g, ' ')).join(' / ');
+      const standGestures = Object.entries(CONSTANTS.GESTURE.MAP).filter(([,v]) => v === 'stand').map(([k]) => k.replace(/_/g, ' ')).join(' / ');
+      return `${hitGestures}: Hit | ${standGestures}: Stand`;
+  }, []);
   
   return (
     <div className="bg-gray-900 rounded-xl overflow-hidden h-full flex flex-col border border-gray-700 shadow-lg">
       <div className="px-4 py-3 bg-gray-800 flex items-center justify-between">
         <h3 className="text-white font-medium">Gesture Control</h3>
-        <div className={`px-2 py-1 rounded text-xs font-medium ${isGestureControlActive && cameraStatus === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+        <div className={`px-2 py-1 rounded text-xs font-medium capitalize ${isGestureControlActive && cameraStatus === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
           ● {isGestureControlActive ? cameraStatus : 'Disabled'}
         </div>
       </div>
@@ -513,32 +560,27 @@ const CameraFeed = memo(() => {
       <div className="flex-1 relative bg-black flex items-center justify-center text-center p-4">
         {!isGestureControlActive ? (
           <div>
-            <div className="text-gray-400 mb-2">Gesture control is off.</div>
-            <div className="text-gray-500 text-sm">Toggle controls in the header to enable.</div>
+            <p className="text-gray-400 mb-2">Gesture control is off.</p>
+            <p className="text-gray-500 text-sm">Toggle controls in the header to enable.</p>
           </div>
-        ) : (cameraStatus === "denied" ? (
+        ) : cameraStatus === "denied" ? (
           <div>
-            <div className="text-red-400 mb-2">Camera access denied</div>
-            <div className="text-gray-400 text-sm">
-              Load the page over <b>https://</b> or <code>http://localhost</code> and
-              allow the "Camera" permission in the address-bar lock icon.
-            </div>
+            <p className="text-red-400 mb-2">Camera Access Denied</p>
+            <p className="text-gray-400 text-sm">Please allow camera permissions in your browser settings to use gesture controls.</p>
           </div>
         ) : cameraStatus === "unavailable" ? (
           <div>
-            <div className="text-red-400 mb-2">No camera available</div>
-            <div className="text-gray-400 text-sm">
-              Close any app that is using the webcam (Zoom, Teams, …) or connect a camera.
-            </div>
+            <p className="text-red-400 mb-2">No Camera Available</p>
+            <p className="text-gray-400 text-sm">Please ensure your camera is connected and not in use by another application.</p>
           </div>
         ) : cameraStatus === 'error' ? (
           <div>
-            <div className="text-red-400 mb-2">Camera Error</div>
-            <div className="text-gray-400 text-sm">Please allow camera access in your browser settings.</div>
+            <p className="text-red-400 mb-2">Initialization Error</p>
+            <p className="text-gray-400 text-sm">Could not load the gesture model. Please check your connection and refresh.</p>
           </div>
         ) : (
           <video ref={videoRef} playsInline muted className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }}/>
-        ))}
+        )}
       </div>
       
       {isGestureControlActive && (
@@ -550,7 +592,7 @@ const CameraFeed = memo(() => {
           <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
             <motion.div className="bg-blue-500 h-full" animate={{ width: `${gestureInfo.confidence * 100}%` }} transition={{ duration: 0.2 }} />
           </div>
-          <div className="mt-2 text-xs text-gray-400 text-center" role="button">Open Palm / Thumbs Up: Hit | Closed Fist / Victory: Stand</div>
+          <p className="mt-2 text-xs text-gray-400 text-center" role="button">{gestureHintText}</p>
         </div>
       )}
     </div>
@@ -558,9 +600,12 @@ const CameraFeed = memo(() => {
 });
 
 const GameOverModal = memo(({ onReset }) => {
-  const roundsWon = useGameStore(s => s.roundsWon);
-  const roundsLost = useGameStore(s => s.roundsLost);
-  const roundsPushed = useGameStore(s => s.roundsPushed);
+  const { roundsWon, roundsLost, roundsPushed } = useGameStore(s => ({
+      roundsWon: s.roundsWon,
+      roundsLost: s.roundsLost,
+      roundsPushed: s.roundsPushed
+  }), shallow);
+
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
       <motion.div
@@ -587,49 +632,39 @@ const GameOverModal = memo(({ onReset }) => {
 });
 
 const GameInterface = () => {
-  const playerMoney = useGameStore(s => s.playerMoney);
-  const bet = useGameStore(s => s.bet);
-  const roundsWon = useGameStore(s => s.roundsWon);
-  const roundsLost = useGameStore(s => s.roundsLost);
-  const roundsPushed = useGameStore(s => s.roundsPushed);
-  const gameState = useGameStore(s => s.gameState);
-  const winner = useGameStore(s => s.winner);
-  const message = useGameStore(s => s.message);
-  const controlMode = useGameStore(s => s.controlMode);
-  const error = useGameStore(s => s.error);
-  const isLoading = useGameStore(s => s.isLoading);
-  const isDealerTurn = useGameStore(s => s.isDealerTurn);
-  const dealerHand = useGameStore(s => s.dealerHand);
-  const playerHand = useGameStore(s => s.playerHand);
-  const setBet = useGameStore(s => s.setBet);
-  const clearError = useGameStore(s => s.clearError);
-  const toggleControlMode = useGameStore(s => s.toggleControlMode);
-  const placeBet = useGameStore(s => s.placeBet);
-  const hit = useGameStore(s => s.hit);
-  const stand = useGameStore(s => s.stand);
-  const newRound = useGameStore(s => s.newRound);
-  const resetGame = useGameStore(s => s.resetGame);
-  const [isGameOver, setIsGameOver] = useState(false);
+  // --- State Selection from Zustand Store ---
+  const { playerMoney, bet, roundsWon, roundsLost, roundsPushed, gameState, message, controlMode, error, isLoading, isDealerTurn, dealerHand, playerHand } = useGameStore(s => s, shallow);
+  const { setBet, clearError, toggleControlMode, placeBet, hit, stand, newRound, resetGame } = useGameStore(s => s);
   
+
+  // The player score is derived from the playerHand state.
+  // useMemo prevents recalculating the score on every render, only when playerHand changes.
+  const playerScore = useMemo(() => calculateScore(playerHand), [playerHand]);
+
+  const [isGameOver, setIsGameOver] = useState(false);
+  const setTimedError = useTimeout();
+  const setTimedGameOver = useTimeout();
+  
+  // --- Effects ---
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => clearError(), 3000);
-      return () => clearTimeout(timer);
+      setTimedError(() => clearError(), 3000);
     }
-  }, [error, clearError]);
+  }, [error, clearError, setTimedError]);
   
   useEffect(() => {
     if (playerMoney <= 0 && gameState === CONSTANTS.GAME_STATES.ROUND_OVER) {
-      const timer = setTimeout(() => setIsGameOver(true), 1500);
-      return () => clearTimeout(timer);
+      setTimedGameOver(() => setIsGameOver(true), 1500);
     }
-  }, [playerMoney, gameState]);
+  }, [playerMoney, gameState, setTimedGameOver]);
   
+  // --- Event Handlers ---
   const handleResetGame = () => {
     setIsGameOver(false);
     resetGame();
   };
 
+  // --- Render Logic ---
   return (
     <div className="min-h-screen bg-gray-950 text-white font-poppins flex flex-col">
       <AnimatePresence>
@@ -642,7 +677,6 @@ const GameInterface = () => {
         )}
       </AnimatePresence>
       
-      {/* Header */}
       <header className="bg-gray-900/80 backdrop-blur-sm border-b border-gray-800 px-6 py-4 flex justify-between items-center">
         <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">GestureAI Blackjack</h1>
         <button
@@ -651,17 +685,14 @@ const GameInterface = () => {
           className="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
         >
           <span className="text-sm text-gray-400">Controls:</span>
-          <span className={`font-medium ${controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'text-blue-400' : 'text-gray-300'}`}>
-            {controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'Gesture' : 'Manual'}
+          <span className={`font-medium capitalize ${controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'text-blue-400' : 'text-gray-300'}`}>
+            {controlMode}
           </span>
         </button>
       </header>
       
-      {/* Main Content */}
-      <main className="flex-1 flex overflow-hidden">
-        {/* Game Area */}
+      <main className="flex-1 flex flex-col md:flex-row overflow-hidden">
         <div className="flex-1 p-6 flex flex-col gap-6">
-          {/* Stats Bar */}
           <div className="bg-gray-900 rounded-xl p-4 flex justify-between items-center shadow-md">
             <div>
               <div className="text-sm text-gray-400">Balance</div>
@@ -674,7 +705,6 @@ const GameInterface = () => {
             </div>
           </div>
           
-          {/* Game Table & Controls */}
           <div className="flex-1 bg-green-800/50 rounded-xl p-6 shadow-2xl relative overflow-hidden flex flex-col justify-center items-center gap-4 bg-gradient-to-br from-green-800 to-green-900">
             {gameState === CONSTANTS.GAME_STATES.IDLE ? (
               <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-6 w-full max-w-sm">
@@ -700,12 +730,11 @@ const GameInterface = () => {
             )}
           </div>
           
-          {/* Action Area */}
           <div className="h-24 flex items-center justify-center">
             {gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !isDealerTurn && (
               controlMode === CONSTANTS.CONTROL_MODES.MANUAL ? (
                 <div className="flex justify-center gap-4">
-                  <button onClick={hit} disabled={isLoading || calculateScore(playerHand) >= 21} className="bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors" aria-label="Hit">Hit</button>
+                  <button onClick={hit} disabled={isLoading || playerScore >= 21} className="bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors" aria-label="Hit">Hit</button>
                   <button onClick={stand} disabled={isLoading} className="bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors" aria-label="Stand">Stand</button>
                 </div>
               ) : (
@@ -718,8 +747,7 @@ const GameInterface = () => {
           </div>
         </div>
         
-        {/* Camera Feed Area */}
-        <aside className="w-96 p-6 bg-gray-900/50 border-l border-gray-800">
+        <aside className="w-full md:w-96 p-6 bg-gray-900/50 border-l border-gray-800">
           <CameraFeed />
         </aside>
       </main>
