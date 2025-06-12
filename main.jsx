@@ -435,13 +435,14 @@ const CameraFeed = memo(() => {
       if (videoRef.current?.srcObject) {
         videoRef.current.srcObject.getTracks().forEach(track => track.stop());
         videoRef.current.srcObject = null;
-        setCameraStatus('initializing');
       }
+      setCameraStatus('initializing');
+      setRecognizerReady(false);
+      setGestureInfo({ gesture: 'None', confidence: 0 });
+      recognizerRef.current = null;
+      
       return;
     }
-
-    // Pre-fetch WASM assets to potentially speed up initialization
-    fetch(`${CONSTANTS.API.WASM_BASE}/vision_wasm_internal.js`, { cache: "force-cache" }).catch(() => {});
 
     const abortController = new AbortController();
     let isCancelled = false;
@@ -459,6 +460,7 @@ const CameraFeed = memo(() => {
         if (err.name === "AbortError") return;
         console.error("Camera Error:", err.name, err.message);
         setCameraStatus(err.name === "NotAllowedError" || err.name === "SecurityError" ? "denied" : "unavailable");
+        return;
       }
 
       // 2. Initialize Gesture Recognizer
