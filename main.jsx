@@ -4,6 +4,10 @@ import { motion, AnimatePresence } from "framer-motion";
 import { createWithEqualityFn } from 'zustand/traditional';
 import { shallow } from "zustand/shallow";
 import "./index.css";
+import {
+  FilesetResolver,
+  GestureRecognizer
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7";
 
 // --- CONSTANTS --- //
 const CONSTANTS = {
@@ -42,47 +46,6 @@ const CONSTANTS = {
   },
   MODEL_PATH: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
 };
-
-// --- GESTURE RECOGNITION WORKER --- //
-const gestureWorkerCode = `
-  import { FilesetResolver, GestureRecognizer } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js';
-  
-  let recognizer = null;
-  let isReady = false;
-  
-  self.onmessage = async ({ data }) => {
-    if (data.type === 'INIT') {
-      try {
-        const vision = await FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-        );
-        
-        recognizer = await GestureRecognizer.createFromOptions(vision, {
-          baseOptions: { 
-            modelAssetPath: data.modelPath,
-            delegate: 'GPU'
-          },
-          runningMode: 'VIDEO',
-          numHands: 1,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5
-        });
-        
-        isReady = true;
-        self.postMessage({ type: 'READY' });
-      } catch (error) {
-        console.error('Gesture worker initialization error:', error);
-        self.postMessage({ type: 'ERROR', error: error.message });
-      }
-    } else if (data.type === 'FRAME' && isReady && recognizer) {
-        const result = recognizer.recognizeForVideo(data.imageData, data.timestamp);
-        if (result && result.gestures.length > 0) {
-          self.postMessage({ type: 'RESULT', result });
-        }
-    }
-  };
-`;
 
 // --- GAME LOGIC UTILITIES --- //
 
@@ -125,6 +88,16 @@ const calculateScore = (hand) => {
   return score;
 };
 
+// --- HOOKS --- //
+function useTimeout() {
+  const id = useRef();
+  useEffect(() => () => clearTimeout(id.current), []);
+  return useCallback((fn, ms) => {
+    clearTimeout(id.current);
+    id.current = setTimeout(fn, ms);
+  }, []);
+}
+
 // --- ZUSTAND GAME STORE --- //
 const useGameStore = createWithEqualityFn((set, get) => ({
   deck: [],
@@ -162,19 +135,15 @@ const useGameStore = createWithEqualityFn((set, get) => ({
     if (isLoading || gameState !== CONSTANTS.GAME_STATES.IDLE) return;
     if (bet <= 0) return set({ error: "Please enter a positive bet amount." });
     if (bet > playerMoney) return set({ error: "Insufficient funds." });
-    
     set({ isLoading: true, error: null });
-    
     setTimeout(() => {
       const deck = createDeck();
       const playerHand = [deck.pop(), deck.pop()];
       const dealerHand = [deck.pop(), deck.pop()];
-      
       const playerScore = calculateScore(playerHand);
       const dealerScore = calculateScore(dealerHand);
       const playerHasBlackjack = playerScore === CONSTANTS.BLACKJACK_SCORE;
       const dealerHasBlackjack = dealerScore === CONSTANTS.BLACKJACK_SCORE;
-      
       set({
         deck, playerHand, dealerHand,
         gameState: CONSTANTS.GAME_STATES.IN_PROGRESS,
@@ -183,7 +152,6 @@ const useGameStore = createWithEqualityFn((set, get) => ({
         isDealerTurn: false,
         isLoading: false
       });
-      
       if (playerHasBlackjack || dealerHasBlackjack) {
         setTimeout(() => get().endRound(), 1000);
       }
@@ -193,16 +161,12 @@ const useGameStore = createWithEqualityFn((set, get) => ({
   hit: () => {
     const state = get();
     if (state.isLoading || state.gameState !== CONSTANTS.GAME_STATES.IN_PROGRESS || state.isDealerTurn) return;
-    
     set({ isLoading: true });
-    
     setTimeout(() => {
       const deck = [...state.deck];
       const playerHand = [...state.playerHand, deck.pop()];
       const playerScore = calculateScore(playerHand);
-      
       set({ deck, playerHand, isLoading: false });
-      
       if (playerScore >= CONSTANTS.BLACKJACK_SCORE) {
         setTimeout(() => get().stand(), 500);
       }
@@ -353,7 +317,8 @@ const Card = memo(({ rank, suit, isHidden }) => {
 });
 
 const Hand = memo(({ cards, playerType }) => {
-  const { gameState, isDealerTurn } = useGameStore(state => ({ gameState: state.gameState, isDealerTurn: state.isDealerTurn }), shallow);
+  const gameState = useGameStore(s => s.gameState);
+  const isDealerTurn = useGameStore(s => s.isDealerTurn);
   const score = calculateScore(cards);
 
   const isDealer = playerType === CONSTANTS.PLAYER_TYPES.DEALER;
@@ -392,15 +357,18 @@ const Hand = memo(({ cards, playerType }) => {
   );
 });
 
+const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.7/wasm";
+
 const CameraFeed = memo(() => {
   const videoRef = useRef(null);
-  const workerRef = useRef(null);
+  const recognizerRef = useRef(null);
   const lastActionTimeRef = useRef(0);
   const canvasRef = useRef(null);
+  const frameIdRef = useRef();
   
   const [cameraStatus, setCameraStatus] = useState('initializing');
   const [gestureInfo, setGestureInfo] = useState({ gesture: 'None', confidence: 0 });
-  const [workerReady, setWorkerReady] = useState(false);
+  const [recognizerReady, setRecognizerReady] = useState(false);
   
   const { controlMode, gameState, isLoading, hit, stand } = useGameStore(state => ({
     controlMode: state.controlMode,
@@ -421,76 +389,80 @@ const CameraFeed = memo(() => {
       }
       return;
     }
-    
-    async function initCamera() {
+
+    fetch(`${WASM_BASE}/vision_wasm_internal.js`, { cache: "force-cache" })
+      .catch(() => {});
+
+    const abort = new AbortController();
+    let cancelled = false;
+    let recognizer;
+
+    async function initCameraAndRecognizer() {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } });
+        const constraints = { video: { facingMode: "user" }, signal: abort.signal };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           await videoRef.current.play();
-          setCameraStatus('active');
+          setCameraStatus("active");
         }
       } catch (err) {
-        console.error("Camera Error:", err);
-        setCameraStatus('error');
+        console.error("Camera Error:", err.name, err.message);
+        switch (err.name) {
+          case "NotAllowedError":
+          case "SecurityError":
+            setCameraStatus("denied");
+            break;
+          case "NotFoundError":
+          case "OverconstrainedError":
+          case "NotReadableError":
+            setCameraStatus("unavailable");
+            break;
+          default:
+            setCameraStatus("error");
+        }
+      }
+      try {
+        const vision = await FilesetResolver.forVisionTasks(WASM_BASE);
+        recognizer = await GestureRecognizer.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: CONSTANTS.MODEL_PATH, delegate: "GPU" },
+          runningMode: "VIDEO",
+          numHands: 1
+        });
+        recognizerRef.current = recognizer;
+        if (!cancelled) {
+          setRecognizerReady(true);
+          setGestureInfo({ gesture: "Ready", confidence: 0 });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          console.error("Recognizer init error:", e);
+          setCameraStatus("error");
+        }
       }
     }
-    initCamera();
+    initCameraAndRecognizer();
 
     return () => {
+      abort.abort();
+      cancelled = true;
+      if (recognizer?.close) recognizer.close();
       if (videoRef.current?.srcObject) {
         videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
       }
-    };
-  }, [isGestureControlActive]);
-  
-  useEffect(() => {
-    if (!isGestureControlActive) {
-      if (workerRef.current) {
-        workerRef.current.terminate();
-        workerRef.current = null;
-        setWorkerReady(false);
-      }
-      setGestureInfo({ gesture: 'Disabled', confidence: 0 });
-      return;
-    }
-
-    const blob = new Blob([gestureWorkerCode], { type: 'application/javascript' });
-    const workerUrl = URL.createObjectURL(blob);
-    workerRef.current = new Worker(workerUrl, { type: 'module' });
-    
-    workerRef.current.onmessage = ({ data }) => {
-      if (data.type === 'READY') {
-        setWorkerReady(true);
-        setGestureInfo({ gesture: 'Ready', confidence: 0 });
-      } else if (data.type === 'ERROR') {
-        console.error('Worker error:', data.error);
-        setCameraStatus('error');
-      } else if (data.type === 'RESULT') {
-        handleGestureResult(data.result);
-      }
-    };
-    
-    workerRef.current.postMessage({ type: 'INIT', modelPath: CONSTANTS.MODEL_PATH });
-    
-    return () => {
-      if (workerRef.current) workerRef.current.terminate();
-      URL.revokeObjectURL(workerUrl);
     };
   }, [isGestureControlActive]);
   
   const handleGestureResult = useCallback((result) => {
     const gesture = result.gestures[0][0];
     setGestureInfo({ gesture: gesture.categoryName, confidence: gesture.score });
-    
     const action = CONSTANTS.GESTURE_MAP[gesture.categoryName];
     const now = Date.now();
-    
-    const canPerformAction = action && 
+    const canPerformAction = action &&
       gesture.score > 0.8 &&
       (now - lastActionTimeRef.current > 2000) &&
       gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !isLoading;
-      
     if (canPerformAction) {
       lastActionTimeRef.current = now;
       if (action === 'hit') hit();
@@ -499,34 +471,35 @@ const CameraFeed = memo(() => {
   }, [gameState, isLoading, hit, stand]);
   
   useEffect(() => {
-    if (!workerReady || !isGestureControlActive) return;
-
+    if (!recognizerReady || !isGestureControlActive) return;
     if (!canvasRef.current) {
-        canvasRef.current = document.createElement('canvas');
-        canvasRef.current.width = 640;
-        canvasRef.current.height = 480;
+      canvasRef.current = document.createElement('canvas');
+      canvasRef.current.width = 640;
+      canvasRef.current.height = 480;
     }
     const canvas = canvasRef.current;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
     let frameId;
-    const processFrame = (now, metadata) => {
-      if (videoRef.current && videoRef.current.readyState >= 2) {
+    const processFrame = async (now, metadata) => {
+      if (videoRef.current && videoRef.current.readyState >= 2 && recognizerRef.current) {
         ctx.drawImage(videoRef.current, 0, 0, 640, 480);
         const imageData = ctx.getImageData(0, 0, 640, 480);
-        workerRef.current?.postMessage({ type: 'FRAME', imageData, timestamp: metadata.presentedFrames });
+        try {
+          const result = await recognizerRef.current.recognizeForVideo(imageData, metadata.presentedFrames);
+          if (result?.gestures?.length) handleGestureResult(result);
+        } catch (e) {}
       }
       frameId = videoRef.current.requestVideoFrameCallback(processFrame);
+      frameIdRef.current = frameId;
     };
-    
     frameId = videoRef.current.requestVideoFrameCallback(processFrame);
-    
+    frameIdRef.current = frameId;
     return () => {
-      if (videoRef.current && frameId) {
-        videoRef.current.cancelVideoFrameCallback(frameId);
+      if (videoRef.current && frameIdRef.current) {
+        videoRef.current.cancelVideoFrameCallback(frameIdRef.current);
       }
     };
-  }, [workerReady, isGestureControlActive]);
+  }, [recognizerReady, isGestureControlActive, handleGestureResult]);
   
   return (
     <div className="bg-gray-900 rounded-xl overflow-hidden h-full flex flex-col border border-gray-700 shadow-lg">
@@ -539,10 +512,25 @@ const CameraFeed = memo(() => {
       
       <div className="flex-1 relative bg-black flex items-center justify-center text-center p-4">
         {!isGestureControlActive ? (
-            <div>
-              <div className="text-gray-400 mb-2">Gesture control is off.</div>
-              <div className="text-gray-500 text-sm">Toggle controls in the header to enable.</div>
+          <div>
+            <div className="text-gray-400 mb-2">Gesture control is off.</div>
+            <div className="text-gray-500 text-sm">Toggle controls in the header to enable.</div>
+          </div>
+        ) : (cameraStatus === "denied" ? (
+          <div>
+            <div className="text-red-400 mb-2">Camera access denied</div>
+            <div className="text-gray-400 text-sm">
+              Load the page over <b>https://</b> or <code>http://localhost</code> and
+              allow the "Camera" permission in the address-bar lock icon.
             </div>
+          </div>
+        ) : cameraStatus === "unavailable" ? (
+          <div>
+            <div className="text-red-400 mb-2">No camera available</div>
+            <div className="text-gray-400 text-sm">
+              Close any app that is using the webcam (Zoom, Teams, …) or connect a camera.
+            </div>
+          </div>
         ) : cameraStatus === 'error' ? (
           <div>
             <div className="text-red-400 mb-2">Camera Error</div>
@@ -550,7 +538,7 @@ const CameraFeed = memo(() => {
           </div>
         ) : (
           <video ref={videoRef} playsInline muted className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }}/>
-        )}
+        ))}
       </div>
       
       {isGestureControlActive && (
@@ -562,9 +550,7 @@ const CameraFeed = memo(() => {
           <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
             <motion.div className="bg-blue-500 h-full" animate={{ width: `${gestureInfo.confidence * 100}%` }} transition={{ duration: 0.2 }} />
           </div>
-          <div className="mt-2 text-xs text-gray-400 text-center">
-            Open Palm / Thumbs Up: Hit | Closed Fist / Victory: Stand
-          </div>
+          <div className="mt-2 text-xs text-gray-400 text-center" role="button">Open Palm / Thumbs Up: Hit | Closed Fist / Victory: Stand</div>
         </div>
       )}
     </div>
@@ -572,7 +558,9 @@ const CameraFeed = memo(() => {
 });
 
 const GameOverModal = memo(({ onReset }) => {
-  const { roundsWon, roundsLost, roundsPushed } = useGameStore(state => ({ ...state }), shallow);
+  const roundsWon = useGameStore(s => s.roundsWon);
+  const roundsLost = useGameStore(s => s.roundsLost);
+  const roundsPushed = useGameStore(s => s.roundsPushed);
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
       <motion.div
@@ -599,37 +587,58 @@ const GameOverModal = memo(({ onReset }) => {
 });
 
 const GameInterface = () => {
-  const state = useGameStore();
+  const playerMoney = useGameStore(s => s.playerMoney);
+  const bet = useGameStore(s => s.bet);
+  const roundsWon = useGameStore(s => s.roundsWon);
+  const roundsLost = useGameStore(s => s.roundsLost);
+  const roundsPushed = useGameStore(s => s.roundsPushed);
+  const gameState = useGameStore(s => s.gameState);
+  const winner = useGameStore(s => s.winner);
+  const message = useGameStore(s => s.message);
+  const controlMode = useGameStore(s => s.controlMode);
+  const error = useGameStore(s => s.error);
+  const isLoading = useGameStore(s => s.isLoading);
+  const isDealerTurn = useGameStore(s => s.isDealerTurn);
+  const dealerHand = useGameStore(s => s.dealerHand);
+  const playerHand = useGameStore(s => s.playerHand);
+  const setBet = useGameStore(s => s.setBet);
+  const clearError = useGameStore(s => s.clearError);
+  const toggleControlMode = useGameStore(s => s.toggleControlMode);
+  const placeBet = useGameStore(s => s.placeBet);
+  const hit = useGameStore(s => s.hit);
+  const stand = useGameStore(s => s.stand);
+  const newRound = useGameStore(s => s.newRound);
+  const resetGame = useGameStore(s => s.resetGame);
   const [isGameOver, setIsGameOver] = useState(false);
   
   useEffect(() => {
-    if (state.error) {
-      const timer = setTimeout(() => state.clearError(), 3000);
+    if (error) {
+      const timer = setTimeout(() => clearError(), 3000);
       return () => clearTimeout(timer);
     }
-  }, [state.error, state.clearError]);
+  }, [error, clearError]);
   
   useEffect(() => {
-    if (state.playerMoney <= 0 && state.gameState === CONSTANTS.GAME_STATES.ROUND_OVER) {
+    if (playerMoney <= 0 && gameState === CONSTANTS.GAME_STATES.ROUND_OVER) {
       const timer = setTimeout(() => setIsGameOver(true), 1500);
       return () => clearTimeout(timer);
     }
-  }, [state.playerMoney, state.gameState]);
+  }, [playerMoney, gameState]);
   
   const handleResetGame = () => {
     setIsGameOver(false);
-    state.resetGame();
+    resetGame();
   };
 
   return (
     <div className="min-h-screen bg-gray-950 text-white font-poppins flex flex-col">
       <AnimatePresence>
         {isGameOver && <GameOverModal onReset={handleResetGame} />}
-        {state.error && (
+        {error && (
           <motion.div
             initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20, transition: { duration: 0.2 } }}
             className="fixed top-5 left-1/2 -translate-x-1/2 bg-red-600 px-4 py-2 rounded-lg z-50 shadow-lg text-sm font-medium"
-          >{state.error}</motion.div>
+          >{error}</motion.div>
         )}
       </AnimatePresence>
       
@@ -637,12 +646,13 @@ const GameInterface = () => {
       <header className="bg-gray-900/80 backdrop-blur-sm border-b border-gray-800 px-6 py-4 flex justify-between items-center">
         <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">GestureAI Blackjack</h1>
         <button
-          onClick={state.toggleControlMode}
+          onClick={toggleControlMode}
+          aria-label="Toggle control mode"
           className="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
         >
           <span className="text-sm text-gray-400">Controls:</span>
-          <span className={`font-medium ${state.controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'text-blue-400' : 'text-gray-300'}`}>
-            {state.controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'Gesture' : 'Manual'}
+          <span className={`font-medium ${controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'text-blue-400' : 'text-gray-300'}`}>
+            {controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'Gesture' : 'Manual'}
           </span>
         </button>
       </header>
@@ -655,55 +665,55 @@ const GameInterface = () => {
           <div className="bg-gray-900 rounded-xl p-4 flex justify-between items-center shadow-md">
             <div>
               <div className="text-sm text-gray-400">Balance</div>
-              <div className="text-2xl font-bold">${state.playerMoney}</div>
+              <div className="text-2xl font-bold">${playerMoney}</div>
             </div>
             <div className="flex gap-6">
-              <div className="text-center"><div className="text-lg font-bold text-green-400">{state.roundsWon}</div><div className="text-xs text-gray-400">Won</div></div>
-              <div className="text-center"><div className="text-lg font-bold text-red-400">{state.roundsLost}</div><div className="text-xs text-gray-400">Lost</div></div>
-              <div className="text-center"><div className="text-lg font-bold text-yellow-400">{state.roundsPushed}</div><div className="text-xs text-gray-400">Push</div></div>
+              <div className="text-center"><div className="text-lg font-bold text-green-400">{roundsWon}</div><div className="text-xs text-gray-400">Won</div></div>
+              <div className="text-center"><div className="text-lg font-bold text-red-400">{roundsLost}</div><div className="text-xs text-gray-400">Lost</div></div>
+              <div className="text-center"><div className="text-lg font-bold text-yellow-400">{roundsPushed}</div><div className="text-xs text-gray-400">Push</div></div>
             </div>
           </div>
           
           {/* Game Table & Controls */}
           <div className="flex-1 bg-green-800/50 rounded-xl p-6 shadow-2xl relative overflow-hidden flex flex-col justify-center items-center gap-4 bg-gradient-to-br from-green-800 to-green-900">
-            {state.gameState === CONSTANTS.GAME_STATES.IDLE ? (
+            {gameState === CONSTANTS.GAME_STATES.IDLE ? (
               <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-6 w-full max-w-sm">
                 <h3 className="text-lg font-medium mb-4 text-center">Place Your Bet</h3>
                 <div className="flex gap-3 mb-4">
-                  <input type="number" value={state.bet} onChange={(e) => state.setBet(e.target.value)} min="1" max={state.playerMoney} className="flex-1 bg-gray-800 rounded-lg px-4 py-2 text-center text-xl font-mono" />
-                  <button onClick={() => state.setBet(Math.floor(state.bet / 2))} className="bg-gray-800 hover:bg-gray-700 px-4 rounded-lg">½</button>
-                  <button onClick={() => state.setBet(Math.min(state.bet * 2, state.playerMoney))} className="bg-gray-800 hover:bg-gray-700 px-4 rounded-lg">2×</button>
-                  <button onClick={() => state.setBet(state.playerMoney)} className="bg-red-600/20 hover:bg-red-600/30 text-red-400 px-4 rounded-lg">Max</button>
+                  <input type="number" value={bet} onChange={(e) => setBet(e.target.value)} min="1" max={playerMoney} className="flex-1 bg-gray-800 rounded-lg px-4 py-2 text-center text-xl font-mono" aria-label="Bet amount" />
+                  <button onClick={() => setBet(Math.floor(bet / 2))} className="bg-gray-800 hover:bg-gray-700 px-4 rounded-lg" aria-label="Halve bet">½</button>
+                  <button onClick={() => setBet(Math.min(bet * 2, playerMoney))} className="bg-gray-800 hover:bg-gray-700 px-4 rounded-lg" aria-label="Double bet">2×</button>
+                  <button onClick={() => setBet(playerMoney)} className="bg-red-600/20 hover:bg-red-600/30 text-red-400 px-4 rounded-lg" aria-label="Max bet">Max</button>
                 </div>
-                <button onClick={state.placeBet} disabled={state.bet <= 0 || state.bet > state.playerMoney || state.isLoading} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-colors">Deal Cards</button>
+                <button onClick={placeBet} disabled={bet <= 0 || bet > playerMoney || isLoading} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-colors" aria-label="Deal Cards">Deal Cards</button>
               </div>
             ) : (
               <div className="w-full h-full flex flex-col justify-around">
-                <Hand cards={state.dealerHand} playerType={CONSTANTS.PLAYER_TYPES.DEALER} />
+                <Hand cards={dealerHand} playerType={CONSTANTS.PLAYER_TYPES.DEALER} />
                 <div className="text-center h-16 flex items-center justify-center">
                   <AnimatePresence mode="wait">
-                    <motion.p key={state.message} initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} className="text-lg font-semibold text-white/90">{state.message}</motion.p>
+                    <motion.p key={message} initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} className="text-lg font-semibold text-white/90"><span role="status" aria-live="polite">{message}</span></motion.p>
                   </AnimatePresence>
                 </div>
-                <Hand cards={state.playerHand} playerType={CONSTANTS.PLAYER_TYPES.PLAYER} />
+                <Hand cards={playerHand} playerType={CONSTANTS.PLAYER_TYPES.PLAYER} />
               </div>
             )}
           </div>
           
           {/* Action Area */}
           <div className="h-24 flex items-center justify-center">
-            {state.gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !state.isDealerTurn && (
-              state.controlMode === CONSTANTS.CONTROL_MODES.MANUAL ? (
+            {gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !isDealerTurn && (
+              controlMode === CONSTANTS.CONTROL_MODES.MANUAL ? (
                 <div className="flex justify-center gap-4">
-                  <button onClick={state.hit} disabled={state.isLoading || calculateScore(state.playerHand) >= 21} className="bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors">Hit</button>
-                  <button onClick={state.stand} disabled={state.isLoading} className="bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors">Stand</button>
+                  <button onClick={hit} disabled={isLoading || calculateScore(playerHand) >= 21} className="bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors" aria-label="Hit">Hit</button>
+                  <button onClick={stand} disabled={isLoading} className="bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors" aria-label="Stand">Stand</button>
                 </div>
               ) : (
                 <div className="bg-gray-900 px-6 py-3 rounded-lg text-center"><p className="text-sm text-gray-400">Use hand gestures to play.</p></div>
               )
             )}
-            {state.gameState === CONSTANTS.GAME_STATES.ROUND_OVER && state.playerMoney > 0 && (
-              <button onClick={state.newRound} className="bg-blue-600 hover:bg-blue-700 px-8 py-3 rounded-lg font-medium transition-colors">Next Round</button>
+            {gameState === CONSTANTS.GAME_STATES.ROUND_OVER && playerMoney > 0 && (
+              <button onClick={newRound} className="bg-blue-600 hover:bg-blue-700 px-8 py-3 rounded-lg font-medium transition-colors" aria-label="Next Round">Next Round</button>
             )}
           </div>
         </div>
