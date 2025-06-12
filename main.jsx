@@ -1,916 +1,728 @@
-﻿import React, { memo, useEffect, useState, useRef } from "react";
+﻿import React, { memo, useEffect, useState, useRef, useCallback } from "react";
 import ReactDOM from "react-dom/client";
 import { motion, AnimatePresence } from "framer-motion";
-import { create } from "zustand";
+import { createWithEqualityFn } from 'zustand/traditional';
 import { shallow } from "zustand/shallow";
 import "./index.css";
 
-const GESTURE_POLL_INTERVAL = 1500;
-const ACTION_DELAY = 400;
+// --- CONSTANTS --- //
+const CONSTANTS = {
+  ACTION_DELAY_MS: 600,
+  DEALER_DELAY_MS: 1000,
+  DEALER_STANDS_ON: 17,
+  BLACKJACK_SCORE: 21,
+  GAME_STATES: {
+    IDLE: "idle",
+    IN_PROGRESS: "in_progress",
+    ROUND_OVER: "round_over",
+  },
+  PLAYER_TYPES: {
+    PLAYER: "player",
+    DEALER: "dealer",
+  },
+  WINNER_TYPES: {
+    PLAYER: "player",
+    DEALER: "dealer",
+    PUSH: "push",
+  },
+  CONTROL_MODES: {
+    MANUAL: "manual",
+    GESTURE: "gesture",
+  },
+  CARD_SUITS: ["hearts", "diamonds", "clubs", "spades"],
+  CARD_RANKS: ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"],
+  GESTURE_MAP: {
+    'Open_Palm': 'hit',
+    'Thumb_Up': 'hit',
+    'ILoveYou': 'hit',
+    'Closed_Fist': 'stand',
+    'Victory': 'stand',
+    'Thumb_Down': 'stand',
+    'Pointing_Up': 'stand'
+  },
+  MODEL_PATH: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+};
 
-const SUITS = ["hearts", "diamonds", "clubs", "spades"];
-const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+// --- GESTURE RECOGNITION WORKER --- //
+const gestureWorkerCode = `
+  import { FilesetResolver, GestureRecognizer } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.js';
+  
+  let recognizer = null;
+  let isReady = false;
+  
+  self.onmessage = async ({ data }) => {
+    if (data.type === 'INIT') {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+        );
+        
+        recognizer = await GestureRecognizer.createFromOptions(vision, {
+          baseOptions: { 
+            modelAssetPath: data.modelPath,
+            delegate: 'GPU'
+          },
+          runningMode: 'VIDEO',
+          numHands: 1,
+          minHandDetectionConfidence: 0.5,
+          minHandPresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5
+        });
+        
+        isReady = true;
+        self.postMessage({ type: 'READY' });
+      } catch (error) {
+        console.error('Gesture worker initialization error:', error);
+        self.postMessage({ type: 'ERROR', error: error.message });
+      }
+    } else if (data.type === 'FRAME' && isReady && recognizer) {
+        const result = recognizer.recognizeForVideo(data.imageData, data.timestamp);
+        if (result && result.gestures.length > 0) {
+          self.postMessage({ type: 'RESULT', result });
+        }
+    }
+  };
+`;
+
+// --- GAME LOGIC UTILITIES --- //
 
 const createDeck = () => {
-  const deck = SUITS.flatMap(suit => RANKS.map(rank => ({ rank, suit, id: `${rank}-${suit}` })));
+  const deck = [];
+  for (const suit of CONSTANTS.CARD_SUITS) {
+    for (const rank of CONSTANTS.CARD_RANKS) {
+      deck.push({ rank, suit, id: `${rank}-${suit}` });
+    }
+  }
   for (let i = deck.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [deck[i], deck[j]] = [deck[j], deck[i]];
   }
-  return deck.map((card) => ({ ...card, key: `${card.id}-${Math.random()}` }));
+  return deck;
 };
 
 const calculateScore = (hand) => {
-  let score = 0, aces = 0;
+  if (!hand?.length) return 0;
+
+  let score = 0;
+  let aces = 0;
+  
   for (const card of hand) {
-    if (!card) continue;
-    if (card.rank === "A") { score += 11; aces += 1; } 
-    else if (["K", "Q", "J"].includes(card.rank)) { score += 10; } 
-    else { score += parseInt(card.rank, 10); }
+    if (card.rank === "A") {
+      aces += 1;
+      score += 11;
+    } else if (["K", "Q", "J"].includes(card.rank)) {
+      score += 10;
+    } else {
+      score += parseInt(card.rank, 10);
+    }
   }
-  while (score > 21 && aces > 0) { score -= 10; aces -= 1; }
+  
+  while (score > CONSTANTS.BLACKJACK_SCORE && aces > 0) {
+    score -= 10;
+    aces -= 1;
+  }
+  
   return score;
 };
 
-const gestureDetector = {
-  gestureWeights: { idle: 0.75, hit: 0.12, stand: 0.13 },
-  minConfidenceThreshold: 0.8,
-  detectGesture() {
-    const gestures = Object.keys(this.gestureWeights);
-    const weights = Object.values(this.gestureWeights);
-    let sum = 0;
-    const cumulativeWeights = weights.map(w => sum += w);
-    const rand = Math.random() * sum;
-    const detectedGesture = gestures[cumulativeWeights.findIndex(cw => rand < cw)] || 'idle';
-    const confidence = detectedGesture !== "idle" ? Math.random() * (0.95 - 0.7) + 0.7 : Math.random() * (0.8 - 0.5) + 0.5;
-    const isConfident = detectedGesture !== "idle" && confidence >= this.minConfidenceThreshold;
-    return { gesture: detectedGesture, confidence: parseFloat(confidence.toFixed(2)), isConfident };
-  }
-};
-
-const useGameStore = create((set, get) => {
-  const withLoading = (action) => (...args) => {
-    if (get().isLoading) return;
-    set({ isLoading: true, error: null });
-    setTimeout(() => {
-      try {
-        action(...args);
-      } catch (error) {
-        console.error(error);
-        set({ error: error.message || "An unknown error occurred." });
-      } finally {
-        if (get().isLoading) set({ isLoading: false });
-      }
-    }, ACTION_DELAY);
-  };
+// --- ZUSTAND GAME STORE --- //
+const useGameStore = createWithEqualityFn((set, get) => ({
+  deck: [],
+  dealerHand: [],
+  playerHand: [],
+  playerMoney: 1000,
+  bet: 50,
+  roundsWon: 0,
+  roundsLost: 0,
+  roundsPushed: 0,
+  gameState: CONSTANTS.GAME_STATES.IDLE,
+  winner: null,
+  message: "Welcome! Place your bet to start.",
+  controlMode: CONSTANTS.CONTROL_MODES.MANUAL,
+  error: null,
+  isLoading: false,
+  isDealerTurn: false,
   
-  const handleRoundOver = (winner, message) => {
-    const { bet, isBlackjack, playerMoney, roundsWon, roundsLost, roundsPushed } = get();
-    let newPlayerMoney = playerMoney, newRoundsWon = roundsWon, newRoundsLost = roundsLost, newRoundsPushed = roundsPushed;
+  setBet: (value) => set(state => {
+    const numValue = parseInt(value, 10);
+    if (isNaN(numValue)) return {};
+    return { bet: Math.min(Math.max(0, numValue), state.playerMoney) };
+  }),
+  
+  clearError: () => set({ error: null }),
+  
+  toggleControlMode: () => set(state => ({
+    controlMode: state.controlMode === CONSTANTS.CONTROL_MODES.MANUAL 
+      ? CONSTANTS.CONTROL_MODES.GESTURE 
+      : CONSTANTS.CONTROL_MODES.MANUAL
+  })),
+  
+  placeBet: () => {
+    const { bet, playerMoney, isLoading, gameState } = get();
+    if (isLoading || gameState !== CONSTANTS.GAME_STATES.IDLE) return;
+    if (bet <= 0) return set({ error: "Please enter a positive bet amount." });
+    if (bet > playerMoney) return set({ error: "Insufficient funds." });
     
-    if (winner === "player") { 
-      newPlayerMoney += isBlackjack ? Math.floor(bet * 1.5) : bet; 
-      newRoundsWon++; 
-    } else if (winner === "dealer") { 
-      newPlayerMoney -= bet; 
-      newRoundsLost++; 
-    } else { 
-      newRoundsPushed++; 
-    }
+    set({ isLoading: true, error: null });
     
-    set({ 
-      winner, 
-      message, 
-      playerMoney: newPlayerMoney, 
-      roundsWon: newRoundsWon, 
-      roundsLost: newRoundsLost, 
-      roundsPushed: newRoundsPushed, 
-      gameState: "round_over", 
-      isDealerTurn: true 
-    });
-  };
-
-  const initialGameState = {
-    deck: [], 
-    dealerHand: [], 
-    playerHand: [], 
-    dealerScore: 0, 
-    playerScore: 0, 
-    playerMoney: 1000,
-    bet: 0, 
-    gameState: "idle", 
-    winner: null, 
-    message: "Welcome! Place your bet to start.", 
-    isBlackjack: false,
-    roundsWon: 0, 
-    roundsLost: 0, 
-    roundsPushed: 0, 
-    controlMode: 'manual',
-    error: null, 
-    isLoading: false, 
-    isDealerTurn: false,
-  };
-
-  return {
-    ...initialGameState,
-    setBet: (value) => set(state => ({ bet: Math.min(Math.max(0, parseInt(value, 10) || 0), state.playerMoney) })),
-    clearError: () => set({ error: null }),
-    initializeGame: () => set(initialGameState),
-    toggleControlMode: () => set(state => ({ controlMode: state.controlMode === 'manual' ? 'gesture' : 'manual' })),
-    placeBet: withLoading(() => {
-      const { bet, playerMoney } = get();
-      if (bet > playerMoney) return set({ error: "Insufficient funds." });
-      if (bet <= 0) return set({ error: "Bet must be greater than zero." });
-
-      const newDeck = createDeck();
-      const playerHand = [newDeck.pop(), newDeck.pop()];
-      const dealerHand = [newDeck.pop(), newDeck.pop()];
+    setTimeout(() => {
+      const deck = createDeck();
+      const playerHand = [deck.pop(), deck.pop()];
+      const dealerHand = [deck.pop(), deck.pop()];
+      
       const playerScore = calculateScore(playerHand);
       const dealerScore = calculateScore(dealerHand);
-      const playerHasBJ = playerScore === 21;
-      const dealerHasBJ = dealerScore === 21;
-
-      set({ 
-        deck: newDeck, 
-        playerHand, 
-        dealerHand, 
-        playerScore, 
-        dealerScore, 
-        bet, 
-        winner: null, 
-        isBlackjack: playerHasBJ, 
-        gameState: "in_progress", 
+      const playerHasBlackjack = playerScore === CONSTANTS.BLACKJACK_SCORE;
+      const dealerHasBlackjack = dealerScore === CONSTANTS.BLACKJACK_SCORE;
+      
+      set({
+        deck, playerHand, dealerHand,
+        gameState: CONSTANTS.GAME_STATES.IN_PROGRESS,
+        winner: null,
         message: "Game in progress. Hit or Stand?",
-        isDealerTurn: false 
+        isDealerTurn: false,
+        isLoading: false
       });
       
-      if (playerHasBJ || dealerHasBJ) {
-        if (playerHasBJ && dealerHasBJ) {
-          handleRoundOver("push", "Push! You and the dealer both have Blackjack.");
-        } else if (playerHasBJ) {
-          handleRoundOver("player", "Blackjack! You win!");
-        } else {
-          handleRoundOver("dealer", "Dealer has Blackjack. You lose.");
-        }
+      if (playerHasBlackjack || dealerHasBlackjack) {
+        setTimeout(() => get().endRound(), 1000);
       }
-    }),
-    hit: withLoading(() => {
-      if (get().gameState !== "in_progress" || get().playerScore >= 21) return;
-      const newDeck = [...get().deck];
-      const playerHand = [...get().playerHand, newDeck.pop()];
-      const playerScore = calculateScore(playerHand);
-      set({ deck: newDeck, playerHand, playerScore });
-      if (playerScore > 21) {
-        handleRoundOver("dealer", "Bust! You went over 21.");
-      }
-    }),
-    stand: async () => {
-      if (get().gameState !== "in_progress" || get().isLoading) return;
-      set({ isLoading: true, message: "Dealer is playing...", isDealerTurn: true });
-      try {
-        const delay = (ms) => new Promise(res => setTimeout(res, ms));
-        await delay(1000);
-        let dealerHand = [...get().dealerHand];
-        let dealerScore = calculateScore(dealerHand);
-        let currentDeck = [...get().deck];
-        
-        while (dealerScore < 17) {
-          await delay(800);
-          const newCard = currentDeck.pop();
-          if (!newCard) break;
-          dealerHand.push(newCard);
-          dealerScore = calculateScore(dealerHand);
-          set({ dealerHand: [...dealerHand], dealerScore, deck: [...currentDeck] });
-        }
-        
-        await delay(500);
-        const playerScore = get().playerScore;
-        let winner, message;
-        
-        if (dealerScore > 21) { 
-          winner = "player"; 
-          message = `Dealer busts with ${dealerScore}! You win!`; 
-        } else if (playerScore > dealerScore) { 
-          winner = "player"; 
-          message = `You win! Your ${playerScore} beats dealer's ${dealerScore}.`; 
-        } else if (dealerScore > playerScore) { 
-          winner = "dealer"; 
-          message = `Dealer wins! Their ${dealerScore} beats your ${playerScore}.`; 
-        } else { 
-          winner = "push"; 
-          message = `Push! Both have ${playerScore}.`; 
-        }
-        
-        handleRoundOver(winner, message);
-      } catch (e) { 
-        set({ error: "An error occurred during the dealer's turn." }); 
-      } finally { 
-        set({ isLoading: false }); 
-      }
-    },
-    newRound: () => {
-      if(get().isLoading) return;
-      set(state => ({ 
-        ...initialGameState, 
-        playerMoney: state.playerMoney, 
-        roundsWon: state.roundsWon, 
-        roundsLost: state.roundsLost, 
-        roundsPushed: state.roundsPushed, 
-        controlMode: state.controlMode, 
-        message: "Place your bet for the next round." 
-      }));
-    },
-    resetGame: () => get().initializeGame(),
-  };
-});
-
-const MOTION_VARIANTS = {
-  panel: { 
-    initial: { opacity: 0, y: 20 }, 
-    animate: { opacity: 1, y: 0, transition: { delay: 0.2, duration: 0.5 } } 
+    }, CONSTANTS.ACTION_DELAY_MS);
   },
-  button: { 
-    hover: { scale: 1.05, boxShadow: "0 10px 20px rgba(0,0,0,0.3)" }, 
-    tap: { scale: 0.95 } 
-  }
-};
+  
+  hit: () => {
+    const state = get();
+    if (state.isLoading || state.gameState !== CONSTANTS.GAME_STATES.IN_PROGRESS || state.isDealerTurn) return;
+    
+    set({ isLoading: true });
+    
+    setTimeout(() => {
+      const deck = [...state.deck];
+      const playerHand = [...state.playerHand, deck.pop()];
+      const playerScore = calculateScore(playerHand);
+      
+      set({ deck, playerHand, isLoading: false });
+      
+      if (playerScore >= CONSTANTS.BLACKJACK_SCORE) {
+        setTimeout(() => get().stand(), 500);
+      }
+    }, CONSTANTS.ACTION_DELAY_MS);
+  },
+  
+  stand: () => {
+    const { isLoading, gameState, isDealerTurn } = get();
+    if (isLoading || gameState !== CONSTANTS.GAME_STATES.IN_PROGRESS || isDealerTurn) return;
+    
+    set({ isLoading: true, isDealerTurn: true, message: "Dealer is playing..." });
+    
+    const dealerPlay = async () => {
+      let currentDeck = [...get().deck];
+      let currentDealerHand = [...get().dealerHand];
+      
+      while (calculateScore(currentDealerHand) < CONSTANTS.DEALER_STANDS_ON) {
+        await new Promise(resolve => setTimeout(resolve, CONSTANTS.DEALER_DELAY_MS));
+        const newCard = currentDeck.pop();
+        currentDealerHand = [...currentDealerHand, newCard];
+        set({ deck: [...currentDeck], dealerHand: [...currentDealerHand] });
+      }
+      
+      get().endRound();
+    };
+    
+    dealerPlay().catch(error => {
+      console.error("Dealer play error:", error);
+      set({ error: "An error occurred during dealer's turn.", isLoading: false });
+    });
+  },
+  
+  endRound: () => {
+    const { playerHand, dealerHand, bet, playerMoney } = get();
+    const playerScore = calculateScore(playerHand);
+    const dealerScore = calculateScore(dealerHand);
+    
+    let winner, message, moneyChange = 0;
+    
+    const playerHasBlackjack = playerScore === CONSTANTS.BLACKJACK_SCORE && playerHand.length === 2;
+    const dealerHasBlackjack = dealerScore === CONSTANTS.BLACKJACK_SCORE && dealerHand.length === 2;
 
-const Card = memo(({ rank, suit, isHidden, isFlipping }) => {
-  const color = suit === "hearts" || suit === "diamonds" ? "text-red-600" : "text-gray-900";
+    if (playerScore > CONSTANTS.BLACKJACK_SCORE) {
+      winner = CONSTANTS.WINNER_TYPES.DEALER;
+      message = `Bust! You went over with ${playerScore}.`;
+      moneyChange = -bet;
+    } else if (dealerScore > CONSTANTS.BLACKJACK_SCORE) {
+      winner = CONSTANTS.WINNER_TYPES.PLAYER;
+      message = `Dealer busts with ${dealerScore}! You win!`;
+      moneyChange = bet;
+    } else if (playerHasBlackjack && !dealerHasBlackjack) {
+      winner = CONSTANTS.WINNER_TYPES.PLAYER;
+      message = "Blackjack! You win 3:2!";
+      moneyChange = Math.floor(bet * 1.5);
+    } else if (dealerHasBlackjack && !playerHasBlackjack) {
+      winner = CONSTANTS.WINNER_TYPES.DEALER;
+      message = "Dealer has Blackjack! You lose.";
+      moneyChange = -bet;
+    } else if (playerScore > dealerScore) {
+      winner = CONSTANTS.WINNER_TYPES.PLAYER;
+      message = `You win! ${playerScore} beats ${dealerScore}.`;
+      moneyChange = bet;
+    } else if (dealerScore > playerScore) {
+      winner = CONSTANTS.WINNER_TYPES.DEALER;
+      message = `Dealer wins. ${dealerScore} beats ${playerScore}.`;
+      moneyChange = -bet;
+    } else {
+      winner = CONSTANTS.WINNER_TYPES.PUSH;
+      message = `Push! Both have ${playerScore}.`;
+    }
+    
+    set(state => ({
+      winner, message,
+      playerMoney: state.playerMoney + moneyChange,
+      roundsWon: state.roundsWon + (winner === CONSTANTS.WINNER_TYPES.PLAYER ? 1 : 0),
+      roundsLost: state.roundsLost + (winner === CONSTANTS.WINNER_TYPES.DEALER ? 1 : 0),
+      roundsPushed: state.roundsPushed + (winner === CONSTANTS.WINNER_TYPES.PUSH ? 1 : 0),
+      gameState: CONSTANTS.GAME_STATES.ROUND_OVER,
+      isLoading: false,
+      isDealerTurn: true,
+    }));
+  },
+  
+  newRound: () => {
+    const { isLoading, playerMoney, bet } = get();
+    if (isLoading) return;
+    
+    set({
+      deck: [], dealerHand: [], playerHand: [],
+      bet: Math.min(bet, playerMoney),
+      gameState: CONSTANTS.GAME_STATES.IDLE,
+      winner: null,
+      message: "Place your bet for the next round.",
+      error: null,
+      isLoading: false,
+      isDealerTurn: false
+    });
+  },
+  
+  resetGame: () => set({
+    deck: [], dealerHand: [], playerHand: [],
+    playerMoney: 1000, bet: 50,
+    roundsWon: 0, roundsLost: 0, roundsPushed: 0,
+    gameState: CONSTANTS.GAME_STATES.IDLE,
+    winner: null,
+    message: "Welcome! Place your bet to start.",
+    error: null,
+    isLoading: false,
+    isDealerTurn: false,
+  })
+}), shallow);
+
+// --- UI COMPONENTS --- //
+
+const Card = memo(({ rank, suit, isHidden }) => {
+  const color = ["hearts", "diamonds"].includes(suit) ? "text-red-500" : "text-gray-900";
   const symbol = { hearts: "♥", diamonds: "♦", clubs: "♣", spades: "♠" }[suit];
-  const cardVariants = { hidden: { rotateY: 180 }, visible: { rotateY: 0 } };
   
   return (
     <div className="w-[80px] h-[112px]" style={{ perspective: '1000px' }}>
       <motion.div 
-        className="relative w-full h-full shadow-lg hover:shadow-xl transition-shadow duration-300 rounded-lg"
+        className="relative w-full h-full"
         style={{ transformStyle: 'preserve-3d' }}
-        variants={cardVariants} 
-        animate={isHidden && !isFlipping ? "hidden" : "visible"} 
+        initial={{ rotateY: 180 }}
+        animate={{ rotateY: isHidden ? 180 : 0 }}
         transition={{ duration: 0.6, ease: "easeInOut" }}
       >
-        {/* Card Back */}
-        <div 
-          className="absolute inset-0 w-full h-full bg-gradient-to-br from-blue-700 to-blue-900 rounded-lg border-2 border-blue-500/50 p-2 flex items-center justify-center"
-          style={{ backfaceVisibility: 'hidden' }}
-        >
-          <div 
-            className="w-full h-full border-2 border-white/20 rounded-md bg-blue-800" 
-            style={{ 
-              backgroundImage: 'radial-gradient(rgba(255,255,255,0.15) 1px, transparent 1px)', 
-              backgroundSize: '5px 5px' 
-            }}
-          />
+        {/* Card Front */}
+        <div className={`absolute inset-0 bg-white rounded-lg shadow-lg p-1.5 ${color} flex flex-col justify-between`} style={{ backfaceVisibility: 'hidden' }}>
+          <div className="text-left">
+            <div className="font-bold text-lg leading-none">{rank}</div>
+            <div className="text-sm leading-none">{symbol}</div>
+          </div>
+          <div className="text-center text-4xl">{symbol}</div>
+          <div className="text-right rotate-180">
+            <div className="font-bold text-lg leading-none">{rank}</div>
+            <div className="text-sm leading-none">{symbol}</div>
+          </div>
         </div>
         
-        {/* Card Front */}
-        <div 
-          className={`absolute inset-0 w-full h-full bg-gradient-to-br from-white to-gray-100 rounded-lg border border-gray-300 flex flex-col p-2 ${color}`}
-          style={{ transform: 'rotateY(180deg)', backfaceVisibility: 'hidden' }}
-        >
-          <div className="flex justify-between items-start h-1/4">
-            <div className="text-xl font-bold leading-none">{rank}</div>
-            <div className="text-lg leading-none">{symbol}</div>
-          </div>
-          <div className="flex-grow flex items-center justify-center text-4xl font-bold">
-            {symbol}
-          </div>
-          <div className="flex justify-between items-end h-1/4 rotate-180">
-            <div className="text-xl font-bold leading-none">{rank}</div>
-            <div className="text-lg leading-none">{symbol}</div>
-          </div>
+        {/* Card Back */}
+        <div className="absolute inset-0 bg-gradient-to-br from-blue-600 to-blue-800 rounded-lg shadow-lg flex items-center justify-center" style={{ transform: 'rotateY(180deg)', backfaceVisibility: 'hidden' }}>
+          <div className="w-[90%] h-[90%] border-2 border-white/30 rounded bg-blue-700/50" style={{ backgroundImage: 'repeating-linear-gradient(45deg, transparent, transparent 5px, rgba(255,255,255,0.1) 5px, rgba(255,255,255,0.1) 10px)' }} />
         </div>
       </motion.div>
     </div>
   );
 });
 
-const Hand = memo(({ cards, type }) => {
-  const { gameState, isDealerTurn } = useGameStore(state => ({ 
-    gameState: state.gameState, 
-    isDealerTurn: state.isDealerTurn 
-  }), shallow);
-  const isRoundActive = gameState === 'in_progress';
+const Hand = memo(({ cards, playerType }) => {
+  const { gameState, isDealerTurn } = useGameStore(state => ({ gameState: state.gameState, isDealerTurn: state.isDealerTurn }), shallow);
+  const score = calculateScore(cards);
+
+  const isDealer = playerType === CONSTANTS.PLAYER_TYPES.DEALER;
+  const isDealerCardHidden = isDealer && !isDealerTurn && gameState === CONSTANTS.GAME_STATES.IN_PROGRESS;
   
   return (
-    <div 
-      className="flex justify-center items-center relative" 
-      style={{ 
-        height: '112px', 
-        minWidth: `${80 + (Math.max(0, cards.length - 1)) * 45}px`
-      }}
-    >
-      <AnimatePresence>
-        {cards.map((card, idx) => (
-          <motion.div 
-            key={card.key} 
-            layoutId={card.key} 
-            initial={{ opacity: 0, y: type === 'player' ? 20 : -20 }} 
-            animate={{ 
-              opacity: 1, 
-              y: 0, 
-              x: (idx - (cards.length - 1) / 2) * 45, 
-              zIndex: idx 
-            }} 
-            exit={{ opacity: 0, y: type === 'player' ? 20 : -20 }} 
-            transition={{ duration: 0.3, ease: 'easeOut' }} 
-            className="absolute"
-          >
-            <Card 
-              rank={card.rank} 
-              suit={card.suit} 
-              isHidden={type === 'dealer' && isRoundActive && idx === 0 && !isDealerTurn} 
-              isFlipping={type === 'dealer' && isDealerTurn && idx === 0} 
-            />
-          </motion.div>
-        ))}
-      </AnimatePresence>
-    </div>
-  );
-});
-
-const Table = memo(() => {
-  const { dealerHand, playerHand, dealerScore, playerScore, gameState, isDealerTurn } = useGameStore(
-    state => state, 
-    shallow
-  );
-  const showDealerScore = isDealerTurn || gameState === 'round_over';
-  
-  return (
-    <motion.div 
-      layout 
-      className="flex flex-col items-center justify-around relative w-full h-full p-4" 
-      initial={{ opacity: 0 }} 
-      animate={{ opacity: 1 }} 
-      transition={{ duration: 0.4 }}
-    >
-      <div 
-        className="absolute inset-0 bg-green-800 rounded-2xl shadow-2xl" 
-        style={{ 
-          backgroundImage: 'radial-gradient(rgba(0,0,0,0.1) 1px, transparent 1px)',
-          backgroundSize: '40px 40px' 
-        }}
-      />
-      <div className="absolute left-1/2 top-0 bottom-0 w-1.5 -translate-x-1/2 bg-green-700/30 blur-sm" />
-      
-      {/* Dealer Section */}
-      <div className="relative z-10 p-4 w-full flex-1 flex flex-col justify-end items-center">
-        <motion.div 
-          className="mb-4 px-4 py-1.5 rounded-full bg-black/60 text-white/95 backdrop-blur-sm text-base tracking-wide font-semibold shadow-md border border-white/10" 
-          initial={{ y: -20, opacity: 0 }} 
-          animate={{ y: 0, opacity: 1 }} 
-          transition={{ delay: 0.2 }}
-        >
-          <span className="mr-2 opacity-80">Dealer</span>
-          <span className="ml-1 px-3 py-1 bg-black/70 rounded-md text-white text-sm font-mono">
-            {showDealerScore ? dealerScore : '?'}
-          </span>
-        </motion.div>
-        <Hand cards={dealerHand} type="dealer" />
-      </div>
-      
-      {/* Player Section */}
-      <div className="relative z-10 p-4 w-full flex-1 flex flex-col justify-start items-center">
-        <Hand cards={playerHand} type="player" />
-        <motion.div 
-          className="mt-4 px-4 py-1.5 rounded-full bg-black/60 text-white/95 backdrop-blur-sm text-base tracking-wide font-semibold shadow-md border border-white/10" 
-          initial={{ y: 20, opacity: 0 }} 
-          animate={{ y: 0, opacity: 1 }} 
-          transition={{ delay: 0.2 }}
-        >
-          <span className="mr-2 opacity-80">You</span>
-          <span className="ml-1 px-3 py-1 bg-black/70 rounded-md text-white text-sm font-mono">
-            {playerScore}
-          </span>
-        </motion.div>
-      </div>
-    </motion.div>
-  );
-});
-
-const useGestureDetection = () => {
-  const { hit, stand, gameState, controlMode, isLoading } = useGameStore(state => state, shallow);
-  const [gestureData, setGestureData] = useState({ gesture: "idle", confidence: 0 });
-  
-  useEffect(() => {
-    if (controlMode !== 'gesture') return;
-    let mounted = true;
-    
-    const intervalId = setInterval(() => {
-      if (!mounted) return;
-      const data = gestureDetector.detectGesture();
-      setGestureData(data);
-      
-      if (data.isConfident && gameState === "in_progress" && !isLoading) {
-        if (data.gesture === "hit") hit();
-        else if (data.gesture === "stand") stand();
-      }
-    }, GESTURE_POLL_INTERVAL);
-    
-    return () => { 
-      mounted = false; 
-      clearInterval(intervalId); 
-    };
-  }, [controlMode, gameState, isLoading, hit, stand]);
-  
-  return { gestureData };
-};
-
-const CameraFeed = () => {
-  const videoRef = useRef(null);
-  const [isStreamActive, setIsStreamActive] = useState(false);
-  const [streamError, setStreamError] = useState(null);
-  const { controlMode, isLoading } = useGameStore(state => ({ 
-    controlMode: state.controlMode, 
-    isLoading: state.isLoading 
-  }), shallow);
-  const { gestureData } = useGestureDetection();
-  
-  useEffect(() => {
-    let stream;
-    const startCamera = async () => {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { width: 1280, height: 720, facingMode: "user" }, 
-          audio: false 
-        });
-        if (videoRef.current) { 
-          videoRef.current.srcObject = stream; 
-          setIsStreamActive(true); 
-          setStreamError(null); 
-        }
-      } catch (error) {
-        let msg = "Camera access denied or unavailable.";
-        if (error.name === 'NotAllowedError') msg = "Please allow camera permissions.";
-        else if (error.name === 'NotFoundError') msg = "No camera was found.";
-        setStreamError(msg);
-      }
-    };
-    startCamera();
-    return () => { 
-      stream?.getTracks().forEach(track => track.stop()); 
-    };
-  }, []);
-  
-  return (
-    <div className="bg-black/50 backdrop-blur-md rounded-2xl border border-white/10 shadow-xl overflow-hidden h-full flex flex-col">
-      <div className="px-4 py-3 bg-gradient-to-r from-purple-600/20 to-blue-600/20 border-b border-white/10 flex-shrink-0 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className={`w-3 h-3 rounded-full ${isStreamActive ? 'bg-purple-500 animate-pulse' : 'bg-gray-600'}`} />
-          <h3 className="text-lg font-semibold text-white">Camera Feed</h3>
-        </div>
-        <div className={`flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium ${
-          isStreamActive ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
-        }`}>
-          <div className={`w-2 h-2 rounded-full ${isStreamActive ? 'bg-green-500' : 'bg-red-500'}`} />
-          {isStreamActive ? 'Live' : 'Offline'}
-        </div>
-      </div>
-      <div className="flex-1 flex flex-col">
-        <div className="relative w-full aspect-[16/9] bg-gray-900">
-          {streamError ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6">
-              <svg className="h-12 w-12 text-red-400 mb-3" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
-              </svg>
-              <h3 className="text-lg font-semibold text-red-400 mb-2">Camera Unavailable</h3>
-              <p className="text-gray-400 text-sm max-w-xs">{streamError}</p>
-            </div>
-          ) : (
-            <>
-              <video 
-                ref={videoRef} 
-                autoPlay 
-                playsInline 
-                muted 
-                className="w-full h-full object-cover" 
-                style={{ transform: 'scaleX(-1)' }} 
+    <div>
+      <div className="flex justify-center items-center relative h-[120px]">
+        <AnimatePresence>
+          {cards.map((card, idx) => (
+            <motion.div
+              key={card.id}
+              layout
+              initial={{ opacity: 0, y: isDealer ? -50 : 50, scale: 0.8 }}
+              animate={{ opacity: 1, y: 0, scale: 1, x: (idx - (cards.length - 1) / 2) * 50 }}
+              exit={{ opacity: 0, scale: 0.8, transition: { duration: 0.2 } }}
+              transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              className="absolute"
+              style={{ zIndex: idx }}
+            >
+              <Card 
+                rank={card.rank} 
+                suit={card.suit} 
+                isHidden={isDealer && idx === 0 && isDealerCardHidden}
               />
-              {controlMode === 'gesture' && isStreamActive && (
-                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                  <div className={`w-56 h-56 rounded-lg transition-all duration-300 ${
-                    isLoading ? 'border-4 border-blue-400 shadow-2xl shadow-blue-500/50' : 'border-2 border-dashed border-white/40 animate-pulse'
-                  }`} />
-                </div>
-              )}
-              {controlMode === 'manual' && isStreamActive && (
-                <div className="absolute inset-0 bg-black/50 flex items-center justify-center pointer-events-none">
-                  <div className="bg-black/60 backdrop-blur-md px-4 py-3 rounded-lg border border-white/20 text-center">
-                    <div className="text-white font-medium mb-1">Manual Mode Active</div>
-                    <div className="text-gray-300 text-sm">Switch to gesture mode to enable AI detection</div>
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-        <div className="px-4 py-3 bg-black/30 border-t border-white/5 flex-shrink-0 h-[74px] flex items-center">
-          {controlMode === 'gesture' ? (
-            <div className="space-y-3 w-full">
-              <div className="flex justify-between items-center">
-                <span className="text-sm text-gray-400">Status:</span>
-                <span className={`text-sm font-medium ${
-                  isLoading ? 'text-blue-400' : 'text-gray-400'
-                }`}>
-                  {isLoading ? "Processing Action..." : "Awaiting Gesture"}
-                </span>
-              </div>
-              <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden">
-                <motion.div 
-                  className="h-full bg-gradient-to-r from-green-400 to-green-600" 
-                  initial={{ width: 0 }} 
-                  animate={{ width: `${isLoading ? 100 : gestureData.confidence * 100}%` }} 
-                  transition={{ duration: isLoading ? 0.5 : 0.3, ease: 'easeOut' }}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="text-center w-full">
-              <p className="text-gray-400 text-sm">Enable gesture mode to use AI detection</p>
-            </div>
-          )}
-        </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+      <div className="text-center mt-4">
+        <span className="bg-black/40 px-4 py-1 rounded-full text-sm font-medium">
+          {isDealer ? 'Dealer' : 'You'}: {isDealerCardHidden ? '?' : score}
+        </span>
       </div>
     </div>
   );
-};
+});
 
-const GamePage = () => {
-  const { 
-    gameState, bet, playerMoney, isLoading, error, controlMode, 
-    winner, message, isBlackjack, roundsWon, roundsLost, roundsPushed, playerScore 
-  } = useGameStore(state => state, shallow);
-  const { 
-    initializeGame, clearError, toggleControlMode, setBet, 
-    placeBet, hit, stand, newRound, resetGame 
-  } = useGameStore.getState();
-  const [initializing, setInitializing] = useState(true);
-  const [showGameOver, setShowGameOver] = useState(false);
-  const [gameOverCountdown, setGameOverCountdown] = useState(null);
+const CameraFeed = memo(() => {
+  const videoRef = useRef(null);
+  const workerRef = useRef(null);
+  const lastActionTimeRef = useRef(0);
+  const canvasRef = useRef(null);
   
-  useEffect(() => { 
-    initializeGame(); 
-    setInitializing(false); 
-  }, []);
+  const [cameraStatus, setCameraStatus] = useState('initializing');
+  const [gestureInfo, setGestureInfo] = useState({ gesture: 'None', confidence: 0 });
+  const [workerReady, setWorkerReady] = useState(false);
   
-  useEffect(() => { 
-    if (error) { 
-      const timer = setTimeout(clearError, 5000); 
-      return () => clearTimeout(timer); 
-    } 
-  }, [error, clearError]);
+  const { controlMode, gameState, isLoading, hit, stand } = useGameStore(state => ({
+    controlMode: state.controlMode,
+    gameState: state.gameState,
+    isLoading: state.isLoading,
+    hit: state.hit,
+    stand: state.stand
+  }), shallow);
+  
+  const isGestureControlActive = controlMode === CONSTANTS.CONTROL_MODES.GESTURE;
+
+  useEffect(() => {
+    if (!isGestureControlActive) {
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
+        setCameraStatus('initializing');
+      }
+      return;
+    }
+    
+    async function initCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+          setCameraStatus('active');
+        }
+      } catch (err) {
+        console.error("Camera Error:", err);
+        setCameraStatus('error');
+      }
+    }
+    initCamera();
+
+    return () => {
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [isGestureControlActive]);
   
   useEffect(() => {
-    if (playerMoney <= 0 && gameState === "round_over" && !showGameOver) {
-      let count = 3;
-      setGameOverCountdown(count);
-      const timer = setInterval(() => { 
-        count--; 
-        setGameOverCountdown(count); 
-        if (count <= 0) { 
-          clearInterval(timer); 
-          setShowGameOver(true); 
-        }
-      }, 1000);
-      return () => clearInterval(timer);
+    if (!isGestureControlActive) {
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
+        setWorkerReady(false);
+      }
+      setGestureInfo({ gesture: 'Disabled', confidence: 0 });
+      return;
     }
-  }, [playerMoney, gameState, showGameOver]);
 
-  if (initializing) {
-    return (
-      <div className="fixed inset-0 flex items-center justify-center bg-black/50 backdrop-blur-md">
-        <div className="w-16 h-16 border-t-2 border-b-2 border-purple-500 rounded-full animate-spin" />
-      </div>
-    );
-  }
+    const blob = new Blob([gestureWorkerCode], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(blob);
+    workerRef.current = new Worker(workerUrl, { type: 'module' });
+    
+    workerRef.current.onmessage = ({ data }) => {
+      if (data.type === 'READY') {
+        setWorkerReady(true);
+        setGestureInfo({ gesture: 'Ready', confidence: 0 });
+      } else if (data.type === 'ERROR') {
+        console.error('Worker error:', data.error);
+        setCameraStatus('error');
+      } else if (data.type === 'RESULT') {
+        handleGestureResult(data.result);
+      }
+    };
+    
+    workerRef.current.postMessage({ type: 'INIT', modelPath: CONSTANTS.MODEL_PATH });
+    
+    return () => {
+      if (workerRef.current) workerRef.current.terminate();
+      URL.revokeObjectURL(workerUrl);
+    };
+  }, [isGestureControlActive]);
   
-  if (showGameOver) {
-    return (
-      <div className="fixed inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md z-50">
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.9 }} 
-          animate={{ opacity: 1, scale: 1 }} 
-          className="bg-black/60 backdrop-blur-md p-10 rounded-2xl border border-red-500/20 shadow-2xl max-w-md w-full mx-4 text-center"
-        >
-          <h2 className="text-4xl mb-4 font-bold text-transparent bg-clip-text bg-gradient-to-r from-red-400 to-orange-500">
-            Game Over
-          </h2>
-          <p className="text-xl text-gray-300 mb-6">You've run out of money.</p>
-          <div className="mb-8 p-4 bg-black/30 rounded-lg">
-            <p className="text-sm text-gray-400 mb-2">Final Statistics:</p>
-            <div className="grid grid-cols-3 gap-2 text-center">
-              <div>
-                <div className="text-2xl text-green-400 font-bold">{roundsWon}</div>
-                <div className="text-xs text-gray-500">Won</div>
-              </div>
-              <div>
-                <div className="text-2xl text-red-400 font-bold">{roundsLost}</div>
-                <div className="text-xs text-gray-500">Lost</div>
-              </div>
-              <div>
-                <div className="text-2xl text-yellow-400 font-bold">{roundsPushed}</div>
-                <div className="text-xs text-gray-500">Pushes</div>
-              </div>
-            </div>
-          </div>
-          <motion.button 
-            {...MOTION_VARIANTS.button} 
-            onClick={() => { setShowGameOver(false); resetGame(); }} 
-            className="bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700 px-8 py-3 rounded-xl text-white font-semibold shadow-lg transition-all text-lg"
-          >
-            Start New Game
-          </motion.button>
-        </motion.div>
-      </div>
-    );
-  }
+  const handleGestureResult = useCallback((result) => {
+    const gesture = result.gestures[0][0];
+    setGestureInfo({ gesture: gesture.categoryName, confidence: gesture.score });
+    
+    const action = CONSTANTS.GESTURE_MAP[gesture.categoryName];
+    const now = Date.now();
+    
+    const canPerformAction = action && 
+      gesture.score > 0.8 &&
+      (now - lastActionTimeRef.current > 2000) &&
+      gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !isLoading;
+      
+    if (canPerformAction) {
+      lastActionTimeRef.current = now;
+      if (action === 'hit') hit();
+      else if (action === 'stand') stand();
+    }
+  }, [gameState, isLoading, hit, stand]);
+  
+  useEffect(() => {
+    if (!workerReady || !isGestureControlActive) return;
+
+    if (!canvasRef.current) {
+        canvasRef.current = document.createElement('canvas');
+        canvasRef.current.width = 640;
+        canvasRef.current.height = 480;
+    }
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    let frameId;
+    const processFrame = (now, metadata) => {
+      if (videoRef.current && videoRef.current.readyState >= 2) {
+        ctx.drawImage(videoRef.current, 0, 0, 640, 480);
+        const imageData = ctx.getImageData(0, 0, 640, 480);
+        workerRef.current?.postMessage({ type: 'FRAME', imageData, timestamp: metadata.presentedFrames });
+      }
+      frameId = videoRef.current.requestVideoFrameCallback(processFrame);
+    };
+    
+    frameId = videoRef.current.requestVideoFrameCallback(processFrame);
+    
+    return () => {
+      if (videoRef.current && frameId) {
+        videoRef.current.cancelVideoFrameCallback(frameId);
+      }
+    };
+  }, [workerReady, isGestureControlActive]);
   
   return (
-    <motion.div 
-      initial={{ opacity: 0 }} 
-      animate={{ opacity: 1 }} 
-      className="fixed inset-0 flex flex-col bg-gradient-to-br from-gray-900 via-black to-gray-900 overflow-hidden"
-    >
-      {isLoading && (
-        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="w-12 h-12 border-t-2 border-b-2 border-purple-500 rounded-full animate-spin" />
+    <div className="bg-gray-900 rounded-xl overflow-hidden h-full flex flex-col border border-gray-700 shadow-lg">
+      <div className="px-4 py-3 bg-gray-800 flex items-center justify-between">
+        <h3 className="text-white font-medium">Gesture Control</h3>
+        <div className={`px-2 py-1 rounded text-xs font-medium ${isGestureControlActive && cameraStatus === 'active' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+          ● {isGestureControlActive ? cameraStatus : 'Disabled'}
+        </div>
+      </div>
+      
+      <div className="flex-1 relative bg-black flex items-center justify-center text-center p-4">
+        {!isGestureControlActive ? (
+            <div>
+              <div className="text-gray-400 mb-2">Gesture control is off.</div>
+              <div className="text-gray-500 text-sm">Toggle controls in the header to enable.</div>
+            </div>
+        ) : cameraStatus === 'error' ? (
+          <div>
+            <div className="text-red-400 mb-2">Camera Error</div>
+            <div className="text-gray-400 text-sm">Please allow camera access in your browser settings.</div>
+          </div>
+        ) : (
+          <video ref={videoRef} playsInline muted className="w-full h-full object-cover" style={{ transform: 'scaleX(-1)' }}/>
+        )}
+      </div>
+      
+      {isGestureControlActive && (
+        <div className="px-4 py-3 bg-gray-800 border-t border-gray-700">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-gray-400 text-sm">Gesture:</span>
+            <span className="text-white font-medium">{gestureInfo.gesture}</span>
+          </div>
+          <div className="w-full bg-gray-700 rounded-full h-2 overflow-hidden">
+            <motion.div className="bg-blue-500 h-full" animate={{ width: `${gestureInfo.confidence * 100}%` }} transition={{ duration: 0.2 }} />
+          </div>
+          <div className="mt-2 text-xs text-gray-400 text-center">
+            Open Palm / Thumbs Up: Hit | Closed Fist / Victory: Stand
+          </div>
         </div>
       )}
-      
-      {error && (
-        <motion.div 
-          initial={{ opacity: 0, y: -20 }} 
-          animate={{ opacity: 1, y: 0 }} 
-          className="fixed top-4 left-1/2 -translate-x-1/2 bg-red-600/90 text-white px-6 py-3 rounded-lg shadow-lg z-50"
+    </div>
+  );
+});
+
+const GameOverModal = memo(({ onReset }) => {
+  const { roundsWon, roundsLost, roundsPushed } = useGameStore(state => ({ ...state }), shallow);
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+      <motion.div
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="bg-gray-900 p-8 rounded-xl max-w-md w-full text-center border border-gray-700 shadow-2xl"
+      >
+        <h2 className="text-3xl font-bold text-red-400 mb-4">Game Over</h2>
+        <p className="text-gray-300 mb-6">You've run out of money!</p>
+        <div className="grid grid-cols-3 gap-4 mb-8">
+          <div><div className="text-2xl font-bold text-green-400">{roundsWon}</div><div className="text-sm text-gray-400">Won</div></div>
+          <div><div className="text-2xl font-bold text-red-400">{roundsLost}</div><div className="text-sm text-gray-400">Lost</div></div>
+          <div><div className="text-2xl font-bold text-yellow-400">{roundsPushed}</div><div className="text-sm text-gray-400">Pushed</div></div>
+        </div>
+        <button
+          onClick={onReset}
+          className="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg font-medium transition-colors w-full"
         >
-          {error}
-        </motion.div>
-      )}
+          New Game
+        </button>
+      </motion.div>
+    </div>
+  );
+});
+
+const GameInterface = () => {
+  const state = useGameStore();
+  const [isGameOver, setIsGameOver] = useState(false);
+  
+  useEffect(() => {
+    if (state.error) {
+      const timer = setTimeout(() => state.clearError(), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [state.error, state.clearError]);
+  
+  useEffect(() => {
+    if (state.playerMoney <= 0 && state.gameState === CONSTANTS.GAME_STATES.ROUND_OVER) {
+      const timer = setTimeout(() => setIsGameOver(true), 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [state.playerMoney, state.gameState]);
+  
+  const handleResetGame = () => {
+    setIsGameOver(false);
+    state.resetGame();
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-950 text-white font-poppins flex flex-col">
+      <AnimatePresence>
+        {isGameOver && <GameOverModal onReset={handleResetGame} />}
+        {state.error && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20, transition: { duration: 0.2 } }}
+            className="fixed top-5 left-1/2 -translate-x-1/2 bg-red-600 px-4 py-2 rounded-lg z-50 shadow-lg text-sm font-medium"
+          >{state.error}</motion.div>
+        )}
+      </AnimatePresence>
       
-      <header className="flex justify-between items-center px-6 py-4 bg-black/30 backdrop-blur-md border-b border-white/10 flex-shrink-0">
-        <motion.div initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}>
-          <h1 className="text-2xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-blue-500">
-            GestureAI Blackjack
-          </h1>
-        </motion.div>
-        <motion.div 
-          initial={{ opacity: 0 }} 
-          animate={{ opacity: 1 }} 
-          transition={{ delay: 0.2 }} 
-          className="flex items-center gap-3 bg-black/30 px-3 py-1.5 rounded-full border border-white/10"
+      {/* Header */}
+      <header className="bg-gray-900/80 backdrop-blur-sm border-b border-gray-800 px-6 py-4 flex justify-between items-center">
+        <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">GestureAI Blackjack</h1>
+        <button
+          onClick={state.toggleControlMode}
+          className="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
         >
-          <span className="text-sm font-medium text-gray-300">Controls:</span>
-          <button 
-            onClick={toggleControlMode} 
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              controlMode === 'gesture' ? 'bg-indigo-600' : 'bg-gray-700'
-            }`}
-          >
-            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-lg transition-transform ${
-              controlMode === 'gesture' ? 'translate-x-6' : 'translate-x-1'
-            }`} />
-          </button>
-          <span className={`text-sm font-medium w-16 text-center ${
-            controlMode === 'gesture' ? 'text-indigo-400' : 'text-gray-300'
-          }`}>
-            {controlMode === 'gesture' ? 'Gesture' : 'Manual'}
+          <span className="text-sm text-gray-400">Controls:</span>
+          <span className={`font-medium ${state.controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'text-blue-400' : 'text-gray-300'}`}>
+            {state.controlMode === CONSTANTS.CONTROL_MODES.GESTURE ? 'Gesture' : 'Manual'}
           </span>
-        </motion.div>
+        </button>
       </header>
       
+      {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
-        <div className="w-3/5 flex flex-col p-4 overflow-y-auto">
-          <motion.div variants={MOTION_VARIANTS.panel} className="mb-4 flex-shrink-0">
-            <div className="bg-black/50 backdrop-blur-md rounded-xl shadow-xl p-5 border border-white/10">
-              <div className="flex justify-between items-center mb-4">
-                <div className="flex items-center gap-4">
-                  <div className="relative w-14 h-14">
-                    <div className="absolute inset-0 bg-gradient-to-br from-yellow-400 to-amber-600 rounded-full shadow-lg" />
-                    <div className="absolute inset-1 bg-gradient-to-br from-yellow-300 to-amber-500 rounded-full flex items-center justify-center text-yellow-900 font-bold text-2xl">
-                      $
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-sm text-gray-300">Your Balance</div>
-                    <div className="text-3xl font-semibold tracking-wide">${playerMoney.toLocaleString()}</div>
-                  </div>
-                </div>
-                <div className="text-sm px-4 py-2 bg-black/50 rounded-full text-gray-200 border border-white/10 font-medium">
-                  {gameState === "idle" ? "Place Bet" : gameState === "in_progress" ? "In Game" : "Round Over"}
-                </div>
-              </div>
-              {(roundsWon > 0 || roundsLost > 0 || roundsPushed > 0) && (
-                <div className="grid grid-cols-3 gap-4 pt-4 mt-4 border-t border-white/10">
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-green-400">{roundsWon}</div>
-                    <div className="text-xs text-gray-400">Wins</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-red-400">{roundsLost}</div>
-                    <div className="text-xs text-gray-400">Losses</div>
-                  </div>
-                  <div className="text-center">
-                    <div className="text-lg font-bold text-yellow-400">{roundsPushed}</div>
-                    <div className="text-xs text-gray-400">Pushes</div>
-                  </div>
-                </div>
-              )}
+        {/* Game Area */}
+        <div className="flex-1 p-6 flex flex-col gap-6">
+          {/* Stats Bar */}
+          <div className="bg-gray-900 rounded-xl p-4 flex justify-between items-center shadow-md">
+            <div>
+              <div className="text-sm text-gray-400">Balance</div>
+              <div className="text-2xl font-bold">${state.playerMoney}</div>
             </div>
-          </motion.div>
+            <div className="flex gap-6">
+              <div className="text-center"><div className="text-lg font-bold text-green-400">{state.roundsWon}</div><div className="text-xs text-gray-400">Won</div></div>
+              <div className="text-center"><div className="text-lg font-bold text-red-400">{state.roundsLost}</div><div className="text-xs text-gray-400">Lost</div></div>
+              <div className="text-center"><div className="text-lg font-bold text-yellow-400">{state.roundsPushed}</div><div className="text-xs text-gray-400">Push</div></div>
+            </div>
+          </div>
           
-          <AnimatePresence mode="wait">
-            {message && (
-              <motion.div 
-                key={message} 
-                initial={{ opacity: 0, y: 10 }} 
-                animate={{ opacity: 1, y: 0 }} 
-                exit={{ opacity: 0 }} 
-                className="mb-4 px-6 py-3 bg-black/40 backdrop-blur-md rounded-lg border border-white/10 text-center flex-shrink-0"
-              >
-                <p className="text-gray-200 font-medium">{message}</p>
-                {isBlackjack && winner === 'player' && (
-                  <div className="mt-2 text-yellow-400 text-sm font-semibold">
-                    🎉 Blackjack pays 3 to 2! 🎉
-                  </div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-          
-          {gameState === "idle" && (
-            <motion.div variants={MOTION_VARIANTS.panel} className="mb-4 flex-shrink-0">
-              <div className="bg-black/50 backdrop-blur-md rounded-2xl p-6 border border-purple-500/20 shadow-xl">
-                <h3 className="text-xl font-semibold mb-4 text-center text-white/90">Place Your Bet</h3>
-                <div className="space-y-4">
-                  <div className="relative">
-                    <input 
-                      type="number" 
-                      min="1" 
-                      max={playerMoney} 
-                      value={bet || ''} 
-                      onChange={(e) => setBet(e.target.value)} 
-                      className="w-full bg-gray-900/80 text-white border-2 border-purple-500/40 rounded-lg py-4 px-5 text-center text-2xl font-mono focus:outline-none focus:ring-2 focus:ring-purple-600 focus:border-transparent shadow-md" 
-                      placeholder="0" 
-                    />
-                    <div className="absolute right-5 top-1/2 -translate-y-1/2 text-purple-400 font-semibold text-xl">$</div>
-                  </div>
-                  <div className="flex justify-between gap-3">
-                    <button 
-                      onClick={() => setBet(Math.max(1, Math.floor(bet / 2)))} 
-                      className="flex-1 bg-gray-800/90 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors border border-white/10 shadow-sm"
-                    >
-                      ½ Bet
-                    </button>
-                    <button 
-                      onClick={() => setBet(Math.min(playerMoney, bet * 2 || 2))} 
-                      className="flex-1 bg-gray-800/90 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors border border-white/10 shadow-sm"
-                    >
-                      2× Bet
-                    </button>
-                    <button 
-                      onClick={() => setBet(playerMoney)} 
-                      className="flex-1 bg-gradient-to-r from-red-600/80 to-purple-600/80 hover:from-red-600 hover:to-purple-600 rounded-lg py-2 text-sm font-bold transition-all border border-red-500/50 shadow-md"
-                    >
-                      All In
-                    </button>
-                  </div>
+          {/* Game Table & Controls */}
+          <div className="flex-1 bg-green-800/50 rounded-xl p-6 shadow-2xl relative overflow-hidden flex flex-col justify-center items-center gap-4 bg-gradient-to-br from-green-800 to-green-900">
+            {state.gameState === CONSTANTS.GAME_STATES.IDLE ? (
+              <div className="bg-gray-900/50 backdrop-blur-sm rounded-xl p-6 w-full max-w-sm">
+                <h3 className="text-lg font-medium mb-4 text-center">Place Your Bet</h3>
+                <div className="flex gap-3 mb-4">
+                  <input type="number" value={state.bet} onChange={(e) => state.setBet(e.target.value)} min="1" max={state.playerMoney} className="flex-1 bg-gray-800 rounded-lg px-4 py-2 text-center text-xl font-mono" />
+                  <button onClick={() => state.setBet(Math.floor(state.bet / 2))} className="bg-gray-800 hover:bg-gray-700 px-4 rounded-lg">½</button>
+                  <button onClick={() => state.setBet(Math.min(state.bet * 2, state.playerMoney))} className="bg-gray-800 hover:bg-gray-700 px-4 rounded-lg">2×</button>
+                  <button onClick={() => state.setBet(state.playerMoney)} className="bg-red-600/20 hover:bg-red-600/30 text-red-400 px-4 rounded-lg">Max</button>
                 </div>
-                <motion.button 
-                  {...MOTION_VARIANTS.button} 
-                  onClick={placeBet} 
-                  disabled={!bet || bet <= 0 || bet > playerMoney || isLoading} 
-                  className="w-full mt-6 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:filter disabled:grayscale disabled:cursor-not-allowed px-8 py-3 rounded-lg font-semibold shadow-lg transition-all flex items-center justify-center gap-3 text-lg"
-                >
-                  Place Bet
-                </motion.button>
+                <button onClick={state.placeBet} disabled={state.bet <= 0 || state.bet > state.playerMoney || state.isLoading} className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-medium transition-colors">Deal Cards</button>
               </div>
-            </motion.div>
-          )}
-          
-          {(gameState === "in_progress" || gameState === "round_over") && (
-            <motion.div className="flex-1 min-h-[350px]">
-              <Table />
-            </motion.div>
-          )}
-          
-          <div className="mt-auto pt-4 flex-shrink-0">
-            {gameState === "in_progress" && (
-              <div className="flex flex-col items-center">
-                {controlMode === 'manual' ? (
-                  <motion.div 
-                    className="flex justify-center gap-6" 
-                    initial={{ opacity: 0, y: 20 }} 
-                    animate={{ opacity: 1, y: 0 }} 
-                    transition={{ delay: 0.4 }}
-                  >
-                    <motion.button 
-                      {...MOTION_VARIANTS.button} 
-                      onClick={hit} 
-                      disabled={isLoading || playerScore >= 21} 
-                      className="bg-gradient-to-r from-yellow-500 to-amber-500 hover:from-yellow-600 hover:to-amber-600 disabled:filter disabled:grayscale disabled:cursor-not-allowed px-8 py-3 rounded-xl font-semibold shadow-lg flex items-center gap-2 text-lg"
-                    >
-                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-                      </svg>
-                      Hit
-                    </motion.button>
-                    <motion.button 
-                      {...MOTION_VARIANTS.button} 
-                      onClick={stand} 
-                      disabled={isLoading} 
-                      className="bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600 disabled:filter disabled:grayscale disabled:cursor-not-allowed px-8 py-3 rounded-xl font-semibold shadow-lg flex items-center gap-2 text-lg"
-                    >
-                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" />
-                      </svg>
-                      Stand
-                    </motion.button>
-                  </motion.div>
-                ) : (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 20 }} 
-                    animate={{ opacity: 1, y: 0 }} 
-                    transition={{ delay: 0.4 }} 
-                    className="px-6 py-4 bg-gradient-to-b from-black/60 to-black/40 backdrop-blur-md rounded-xl border border-indigo-500/30 shadow-lg"
-                  >
-                    <div className="flex items-center gap-3 justify-center mb-1">
-                      <div className="relative flex items-center justify-center">
-                        <div className="absolute w-3 h-3 bg-indigo-500/50 rounded-full animate-ping" />
-                        <div className="relative w-2 h-2 bg-indigo-500 rounded-full" />
-                      </div>
-                      <h3 className="text-lg font-semibold text-transparent bg-clip-text bg-gradient-to-r from-indigo-300 to-blue-400">
-                        Gesture Control Active
-                      </h3>
-                    </div>
-                    <p className="text-gray-300 text-sm text-center">Use camera feed to Hit or Stand</p>
-                  </motion.div>
-                )}
+            ) : (
+              <div className="w-full h-full flex flex-col justify-around">
+                <Hand cards={state.dealerHand} playerType={CONSTANTS.PLAYER_TYPES.DEALER} />
+                <div className="text-center h-16 flex items-center justify-center">
+                  <AnimatePresence mode="wait">
+                    <motion.p key={state.message} initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 10 }} className="text-lg font-semibold text-white/90">{state.message}</motion.p>
+                  </AnimatePresence>
+                </div>
+                <Hand cards={state.playerHand} playerType={CONSTANTS.PLAYER_TYPES.PLAYER} />
               </div>
             )}
-            
-            {gameState === "round_over" && (
-              <motion.div 
-                className="flex flex-col items-center gap-4 mt-4" 
-                initial={{ opacity: 0, y: 20 }} 
-                animate={{ opacity: 1, y: 0 }} 
-                transition={{ delay: 0.3 }}
-              >
-                {winner && (
-                  <div className={`text-xl font-bold px-6 py-3 rounded-full border-2 ${
-                    winner === 'player' ? 'bg-green-600/20 border-green-500/50 text-green-300' : 
-                    winner === 'dealer' ? 'bg-red-600/20 border-red-500/50 text-red-300' : 
-                    'bg-yellow-600/20 border-yellow-500/50 text-yellow-300'
-                  }`}>
-                    {winner === 'player' ? '🎉 You Win! 🎉' : 
-                     winner === 'dealer' ? '😔 Dealer Wins' : 
-                     '🤝 Push - Tie'}
-                  </div>
-                )}
-                <AnimatePresence mode="wait">
-                  <motion.div 
-                    key={playerMoney > 0 ? 'play' : 'over'} 
-                    initial={{opacity: 0}} 
-                    animate={{opacity: 1}} 
-                    exit={{opacity: 0}}
-                  >
-                    {playerMoney > 0 ? (
-                      <motion.button 
-                        {...MOTION_VARIANTS.button} 
-                        onClick={newRound} 
-                        disabled={isLoading} 
-                        className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 disabled:filter disabled:grayscale disabled:cursor-not-allowed px-8 py-3 rounded-xl font-semibold shadow-lg flex items-center gap-3 text-lg"
-                      >
-                        Play Again
-                      </motion.button>
-                    ) : (
-                      <div className="text-lg font-semibold px-6 py-3 mt-2 bg-red-600/20 border border-red-500/50 rounded-full text-red-300 animate-pulse">
-                        Game over in {gameOverCountdown}...
-                      </div>
-                    )}
-                  </motion.div>
-                </AnimatePresence>
-              </motion.div>
+          </div>
+          
+          {/* Action Area */}
+          <div className="h-24 flex items-center justify-center">
+            {state.gameState === CONSTANTS.GAME_STATES.IN_PROGRESS && !state.isDealerTurn && (
+              state.controlMode === CONSTANTS.CONTROL_MODES.MANUAL ? (
+                <div className="flex justify-center gap-4">
+                  <button onClick={state.hit} disabled={state.isLoading || calculateScore(state.playerHand) >= 21} className="bg-green-600 hover:bg-green-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors">Hit</button>
+                  <button onClick={state.stand} disabled={state.isLoading} className="bg-red-600 hover:bg-red-700 disabled:bg-gray-700 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition-colors">Stand</button>
+                </div>
+              ) : (
+                <div className="bg-gray-900 px-6 py-3 rounded-lg text-center"><p className="text-sm text-gray-400">Use hand gestures to play.</p></div>
+              )
+            )}
+            {state.gameState === CONSTANTS.GAME_STATES.ROUND_OVER && state.playerMoney > 0 && (
+              <button onClick={state.newRound} className="bg-blue-600 hover:bg-blue-700 px-8 py-3 rounded-lg font-medium transition-colors">Next Round</button>
             )}
           </div>
         </div>
         
-        <aside className="w-2/5 p-4 flex-shrink-0">
-          <motion.div 
-            initial={{ opacity: 0, x: 20 }} 
-            animate={{ opacity: 1, x: 0 }} 
-            transition={{ delay: 0.4, duration: 0.5 }} 
-            className="h-full"
-          >
-            <CameraFeed />
-          </motion.div>
+        {/* Camera Feed Area */}
+        <aside className="w-96 p-6 bg-gray-900/50 border-l border-gray-800">
+          <CameraFeed />
         </aside>
       </main>
-    </motion.div>
+    </div>
   );
+};
+
+function App() {
+  return <GameInterface />;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
-    <GamePage />
+    <App />
   </React.StrictMode>
 );
