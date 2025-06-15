@@ -20,7 +20,7 @@ export const DEFAULT_SETTINGS: Settings = {
 export const GAME_CONFIG = {
   initialBalance: 1000,
   minBet: 10,
-  maxBet: 500,
+  maxBet: 10000,
   blackjackPayout: 1.5,
   dealerStandValue: 17,
   animationDuration: 400
