@@ -8,6 +8,7 @@ import { soundManager } from '../lib/soundManager';
 
 export const useGestureControl = () => {
   const [enabled, setEnabled] = useState(false);
+  const [isRecognizerReady, setIsRecognizerReady] = useState(false);
   const [currentGesture, setCurrentGesture] = useState<string | null>(null);
   const [gestureProgress, setGestureProgress] = useState(0);
   
@@ -17,7 +18,7 @@ export const useGestureControl = () => {
   const animationFrameRef = useRef<number>(0);
   
   const { settings } = useSettingsStore();
-  const game = useGameStore();
+  const { phase, isAnimating, playerCards, balance, bet, hit, stand, double } = useGameStore();
   const { addGestureLog } = useCalibrationStore();
   
   // Initialize camera
@@ -36,6 +37,7 @@ export const useGestureControl = () => {
       }
       setCurrentGesture(null);
       setGestureProgress(0);
+      setIsRecognizerReady(false);
       return;
     }
     
@@ -80,6 +82,7 @@ export const useGestureControl = () => {
             
             if (mounted) {
               recognizerRef.current = recognizer;
+              setIsRecognizerReady(true);
             } else {
               await recognizer.close();
             }
@@ -101,7 +104,7 @@ export const useGestureControl = () => {
   
   // Recognition loop
   useEffect(() => {
-    if (!enabled || !recognizerRef.current || !videoRef.current) return;
+    if (!enabled || !isRecognizerReady || !recognizerRef.current || !videoRef.current) return;
     
     let isActive = true;
     let frameCounter = 0;
@@ -122,19 +125,19 @@ export const useGestureControl = () => {
         setCurrentGesture(result.name);
         setGestureProgress(result.holdProgress);
         
-        if (result.shouldTrigger && game.phase === 'playing' && !game.isAnimating) {
+        if (result.shouldTrigger && phase === 'playing' && !isAnimating) {
           let action: string | null = null;
           
           if (result.name === settings.hitGesture) {
-            game.hit();
+            hit();
             action = 'hit';
           } else if (result.name === settings.standGesture) {
-            game.stand();
+            stand();
             action = 'stand';
           } else if (result.name === settings.doubleGesture && 
-                     game.playerCards.length === 2 && 
-                     game.balance >= game.bet) {
-            game.double();
+                     playerCards.length === 2 && 
+                     balance >= bet) {
+            double();
             action = 'double';
           }
           
@@ -171,7 +174,7 @@ export const useGestureControl = () => {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [enabled, settings, game, addGestureLog]);
+  }, [enabled, isRecognizerReady, settings, phase, isAnimating, playerCards, balance, bet, hit, stand, double, addGestureLog]);
   
   return {
     enabled,
