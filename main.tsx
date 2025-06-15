@@ -1,1574 +1,1786 @@
-/* ── 0 · external deps ─────────────────────────────────────────────────────── */
+/* ── External Dependencies ─────────────────────────────────────────────────── */
 import React, {
-  useState, useEffect, useRef, memo
-}                                   from 'react';
-import { createRoot }               from 'react-dom/client';
-import { motion, AnimatePresence }  from 'framer-motion';
-import { create }                   from 'zustand';
-import toast, { Toaster }           from 'react-hot-toast';
+  useState, useEffect, useRef, memo, useCallback, useMemo
+} from 'react';
+import { createRoot } from 'react-dom/client';
+import { motion, AnimatePresence } from 'framer-motion';
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import toast, { Toaster } from 'react-hot-toast';
 
-/* ── 1 · type helpers ──────────────────────────────────────────────────────── */
+/* ── Type Definitions ──────────────────────────────────────────────────────── */
 type Suit = '♠' | '♥' | '♦' | '♣';
-type Rank = 'A' | 'K' | 'Q' | 'J'
-          | '10' | '9' | '8' | '7' | '6' | '5' | '4' | '3' | '2';
+type Rank = 'A' | 'K' | 'Q' | 'J' | '10' | '9' | '8' | '7' | '6' | '5' | '4' | '3' | '2';
 
-interface Card { suit: Suit; rank: Rank; id: string; }
-interface Log  { t: string; g: string; score: number; }
-
-interface Settings {
-  hitGesture   : string;
-  standGesture : string;
-  doubleGesture: string;
-  holdTime     : number;
-  confidence   : number;
-  autoLearn    : boolean;
-  muted        : boolean;
-  leftHand     : boolean;
-  vibration    : boolean;
-  theme        : 'dark' | 'neon' | 'classic';
+interface Card {
+  suit: Suit;
+  rank: Rank;
+  id: string;
 }
 
-type Phase = 'betting' | 'dealing' | 'playing' | 'dealer' | 'ended';
+interface GestureSample {
+  gesture: string;
+  landmarks: number[][];
+  timestamp: number;
+}
 
-interface Store {
-  /* settings */
-  settings: Settings;
-  updateSettings: (u: Partial<Settings>) => void;
-  resetSettings : () => void;
+interface CalibrationData {
+  samples: Record<string, GestureSample[]>;
+  createdAt: number;
+  version: string;
+}
 
-  /* AI log */
-  logs   : Log[];
-  pushLog: (l: Log) => void;
+interface GestureLog {
+  timestamp: number;
+  gesture: string;
+  confidence: number;
+  action: string | null;
+  latency: number;
+}
 
-  /* blackjack */
+interface Settings {
+  hitGesture: string;
+  standGesture: string;
+  doubleGesture: string;
+  holdTime: number;
+  confidence: number;
+  soundEnabled: boolean;
+  vibrationEnabled: boolean;
+  highContrast: boolean;
+  privacyMode: boolean;
+}
+
+type GamePhase = 'waiting' | 'dealing' | 'playing' | 'dealer-turn' | 'game-over';
+
+interface GameState {
   balance: number;
   bet: number;
   deck: Card[];
-  playerHand: Card[];
-  dealerHand: Card[];
-  phase: Phase;
-  showDealer: boolean;
-  msg: string;
-  winStreak: number;
-  lastWin: boolean;
-
-  setBet : (v: number) => void;
-  deal   : () => void;
-  checkBJ: (p: Card[], d: Card[]) => void;
-  hit    : () => void;
-  stand  : () => void;
-  double : () => void;
-  dealerPlay: () => void;
-  end    : (msg?: string, win?: number | null) => void;
-  next   : () => void;
-  reset  : () => void;
+  playerCards: Card[];
+  dealerCards: Card[];
+  phase: GamePhase;
+  dealerRevealed: boolean;
+  message: string;
+  lastResult: 'win' | 'loss' | 'push' | null;
+  isAnimating: boolean;
+  stats: {
+    handsPlayed: number;
+    handsWon: number;
+    totalWinnings: number;
+    bestStreak: number;
+    currentStreak: number;
+  };
+  
+  // Actions
+  placeBet: (amount: number) => void;
+  deal: () => void;
+  hit: () => void;
+  stand: () => void;
+  double: () => void;
+  nextRound: () => void;
+  reset: () => void;
 }
 
-/* ── 2 · constants ─────────────────────────────────────────────────────────── */
-const GESTURE_OPTIONS = [
-  'Open_Palm',  'Closed_Fist', 'Thumb_Up',   'Thumb_Down',
-  'Victory',    'ILoveYou',    'Pointing_Up','OK_Sign',
-  'Call_Me',    'Live_Long',   'Rock_On'
-] as const;
+/* ── Constants ─────────────────────────────────────────────────────────────── */
+const GESTURES = [
+  'Open_Palm', 'Closed_Fist', 'Thumb_Up', 'Thumb_Down',
+  'Victory', 'Pointing_Up', 'OK_Sign'
+];
 
 const DEFAULT_SETTINGS: Settings = {
-  hitGesture   : 'Open_Palm',
-  standGesture : 'Closed_Fist',
+  hitGesture: 'Open_Palm',
+  standGesture: 'Closed_Fist',
   doubleGesture: 'Thumb_Down',
-  holdTime     : 600,
-  confidence   : 0.75,
-  autoLearn    : true,
-  muted        : false,
-  leftHand     : false,
-  vibration    : true,
-  theme        : 'neon'
+  holdTime: 500,
+  confidence: 0.7,
+  soundEnabled: true,
+  vibrationEnabled: true,
+  highContrast: false,
+  privacyMode: false
 };
 
-const CONFIG = {
-  startingBalance: 1_000,
-  minBet         : 10,
-  defaultBet     : 50,
+const GAME_CONFIG = {
+  initialBalance: 1000,
+  minBet: 10,
+  maxBet: 500,
   blackjackPayout: 1.5,
-  dealerStandsOn : 17
+  dealerStandValue: 17,
+  animationDuration: 400
 };
 
-const THEMES = {
-  dark: {
-    bg: 'bg-gradient-to-br from-gray-900 via-gray-800 to-gray-900',
-    table: 'bg-gradient-to-br from-green-900/90 to-green-800/90 backdrop-blur-sm',
-    card: 'bg-white',
-    accent: 'bg-blue-600',
-    text: 'text-white'
-  },
-  neon: {
-    bg: 'bg-gradient-to-br from-purple-900 via-pink-900 to-blue-900',
-    table: 'bg-gradient-to-br from-purple-800/40 to-pink-800/40 backdrop-blur-xl border border-pink-500/30',
-    card: 'bg-gradient-to-br from-white to-gray-100',
-    accent: 'bg-gradient-to-r from-pink-500 to-blue-500',
-    text: 'text-white'
-  },
-  classic: {
-    bg: 'bg-gradient-to-br from-green-800 to-green-900',
-    table: 'bg-gradient-to-br from-green-700 to-green-800',
-    card: 'bg-white',
-    accent: 'bg-red-700',
-    text: 'text-white'
-  }
-};
-
-/* ── 3 · MediaPipe wrapper ─────────────────────────────────────────────────── */
-interface RawGesture { categoryName: string; score: number; }
-
-class MediaPipeRecognizer {
-  private recog: any;
-  private video?: HTMLVideoElement;
-  private lastGesture: string | null = null;
-  private gestureStartTime: number = 0;
-
-  async init(video: HTMLVideoElement) {
-    // @ts-ignore – lib ships no d.ts
-    const { FilesetResolver, GestureRecognizer } =
-      await import('@mediapipe/tasks-vision');
-
-    // @ts-ignore
-    const vision = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.12/wasm'
-    );
-
-    // @ts-ignore
-    this.recog = await GestureRecognizer.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath:
-          'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
-        delegate: 'GPU'
-      },
-      runningMode : 'VIDEO',
-      numHands    : 2,
-      minHandDetectionConfidence : 0.5,
-      minHandPresenceConfidence  : 0.5,
-      minTrackingConfidence      : 0.5
-    });
-
-    this.video = video;
-  }
-
-  recognise(ts: number): RawGesture | null {
-    if (!this.recog || !this.video) return null;
-    
-    try {
-      const r = this.recog.recognizeForVideo(this.video, ts);
-      const gesture = r.gestures?.[0]?.[0];
-      
-      if (gesture) {
-        // Smooth gesture transitions
-        if (gesture.categoryName !== this.lastGesture) {
-          this.lastGesture = gesture.categoryName;
-          this.gestureStartTime = ts;
-        }
-        
-        // Add temporal smoothing
-        const timeSinceStart = ts - this.gestureStartTime;
-        const temporalBoost = Math.min(timeSinceStart / 1000, 0.1);
-        
-        return {
-          categoryName: gesture.categoryName,
-          score: Math.min(gesture.score + temporalBoost, 1)
-        };
-      }
-      
-      return null;
-    } catch (e) {
-      console.warn('Gesture recognition error:', e);
-      return null;
+/* ── Utility Functions ─────────────────────────────────────────────────────── */
+const createDeck = (): Card[] => {
+  const deck: Card[] = [];
+  const suits: Suit[] = ['♠', '♥', '♦', '♣'];
+  const ranks: Rank[] = ['A', 'K', 'Q', 'J', '10', '9', '8', '7', '6', '5', '4', '3', '2'];
+  
+  for (const suit of suits) {
+    for (const rank of ranks) {
+      deck.push({ suit, rank, id: `${rank}-${suit}-${Math.random()}` });
     }
   }
-
-  async close() {
-    await this.recog?.close();
-    this.recog = null;
-    this.lastGesture = null;
+  
+  // Fisher-Yates shuffle
+  for (let i = deck.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [deck[i], deck[j]] = [deck[j], deck[i]];
   }
-}
+  
+  return deck;
+};
 
-/* ── 4 · helpers ───────────────────────────────────────────────────────────── */
-const createDeck = (): Card[] =>
-  (['♠','♥','♦','♣'] as Suit[])
-    .flatMap(s =>
-      (['A','K','Q','J','10','9','8','7','6','5','4','3','2'] as Rank[])
-        .map(r => ({ suit:s, rank:r, id:`${r}-${s}-${crypto.randomUUID()}` }))
-    )
-    .sort(() => Math.random() - 0.5);
-
-const calc = (hand: (Card | undefined)[]): number => {
+const calculateHandValue = (cards: Card[]): number => {
   let value = 0;
-  let aces  = 0;
-
-  hand.forEach(card => {
-    if (!card) return;
+  let aces = 0;
+  
+  for (const card of cards) {
     if (card.rank === 'A') {
       value += 11;
-      aces  += 1;
-    } else if ('KQJ'.includes(card.rank)) {
+      aces++;
+    } else if (['K', 'Q', 'J'].includes(card.rank)) {
       value += 10;
     } else {
-      value += Number(card.rank);
+      value += parseInt(card.rank);
     }
-  });
-
-  while (value > 21 && aces--) value -= 10;
+  }
+  
+  while (value > 21 && aces > 0) {
+    value -= 10;
+    aces--;
+  }
+  
   return value;
 };
 
-const vibrate = (pattern: number | number[]) => {
-  if ('vibrate' in navigator) {
-    navigator.vibrate(pattern);
+/* ── Sound Manager ─────────────────────────────────────────────────────────── */
+const soundManager = {
+  sounds: new Map<string, HTMLAudioElement>(),
+  initialized: false,
+  
+  async init() {
+    if (this.initialized) return;
+    
+    const soundData = {
+      deal: 'data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmwhBi13yvLTgjMGHm7A7+OZURE',
+      win: 'data:audio/wav;base64,UklGRpwGAABXQVZFZm10IBAAAAABAAEAQAcAAEAHAAABAAgAZGF0YXgGAAB6gYaIjY6Li4uNkZSOioprdHd+hoeGg4GDiY+Qi4aDfHh8gISGh4SCfnx+gYOEhYaGhYWEg4J/fX5/gYKDg4ODg4ODg4ODg4OCgYB/fn1+fn9/f39/f39+fn19fX19fX19fHx8fHx8fHx8fHx8fHx8fHx8fHx8fH',
+      lose: 'data:audio/wav;base64,UklGRuYFAABXQVZFZm10IBAAAAABAAEAQAcAAEAHAAABAAgAZGF0YcIFAAB1hYuKhn15d4OKjYmCeXR5gYiKiYR+eHmAhYiHhX58eoGFhYOBfnx+gYOCgH99fYCBgH9+fX5+f39+fX19fn5+fn19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19fX19',
+      gesture: 'data:audio/wav;base64,UklGRjIBAABXQVZFZm10IBAAAAABAAEAESsAABErAAABAAgAZGF0YQ4BAACAgoSFiIqMjZCSlJaZm52foKOlp6qsrrCztLa4u72/wsTGyczO0NLV19nb3uDi5Ofo6uzu8PL09vj6/P4AAAH/'
+    };
+    
+    try {
+      for (const [key, data] of Object.entries(soundData)) {
+        const audio = new Audio(data);
+        audio.volume = 0.1;
+        this.sounds.set(key, audio);
+      }
+      this.initialized = true;
+    } catch (error) {
+      console.warn('Sound initialization failed:', error);
+    }
+  },
+  
+  play(sound: string) {
+    if (!useSettingsStore.getState().settings.soundEnabled) return;
+    
+    const audio = this.sounds.get(sound);
+    if (audio) {
+      audio.currentTime = 0;
+      audio.play().catch(() => {});
+    }
   }
 };
 
-/* ── 5 · zustand store ─────────────────────────────────────────────────────── */
-const useGame = create<Store>((set, get) => ({
-  /* settings */
-  settings: (() => {
+/* ── MediaPipe Gesture Recognition ─────────────────────────────────────────── */
+class GestureRecognizer {
+  private recognizer: any = null;
+  private ready = false;
+  private lastGesture: string | null = null;
+  private lastGestureTime = 0;
+  private cooldownTimer: any = null;
+  
+  async init(video: HTMLVideoElement) {
     try {
-      return { ...DEFAULT_SETTINGS,
-               ...JSON.parse(localStorage.getItem('settings') || '{}') };
-    } catch {
-      return DEFAULT_SETTINGS;
+      const { GestureRecognizer, FilesetResolver } = await import('@mediapipe/tasks-vision');
+      
+      const vision = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.12/wasm'
+      );
+      
+      this.recognizer = await GestureRecognizer.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
+          delegate: 'GPU'
+        },
+        runningMode: 'VIDEO',
+        numHands: 1,
+        minHandDetectionConfidence: 0.5,
+        minHandPresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+      
+      this.ready = true;
+    } catch (error) {
+      console.error('Failed to initialize MediaPipe:', error);
+      throw error;
     }
-  })(),
-
-  updateSettings: u => set(state => {
-    const ns = { ...state.settings };
-
-    const gestureKeys = ['hitGesture','standGesture','doubleGesture'] as const;
-    for (const k of gestureKeys) {
-      if (u[k] && u[k] !== ns[k]) {
-        if (gestureKeys.some(other => other !== k && ns[other] === u[k])) {
-          toast.error('That gesture is already in use', {
-            icon: '⚠️',
-            style: {
-              borderRadius: '10px',
-              background: '#333',
-              color: '#fff',
-            }
-          });
-          return {};
+  }
+  
+  recognize(video: HTMLVideoElement, timestamp: number) {
+    if (!this.ready || !this.recognizer || !video.videoWidth) return null;
+    
+    try {
+      const results = this.recognizer.recognizeForVideo(video, timestamp);
+      const gesture = results.gestures?.[0]?.[0];
+      
+      if (gesture && gesture.score >= useSettingsStore.getState().settings.confidence) {
+        const now = Date.now();
+        
+        // New gesture detected
+        if (gesture.categoryName !== this.lastGesture) {
+          this.lastGesture = gesture.categoryName;
+          this.lastGestureTime = now;
+          return {
+            name: gesture.categoryName,
+            confidence: gesture.score,
+            holdProgress: 0,
+            shouldTrigger: false
+          };
         }
+        
+        // Check if held long enough
+        const holdDuration = now - this.lastGestureTime;
+        const holdTime = useSettingsStore.getState().settings.holdTime;
+        const holdProgress = Math.min(holdDuration / holdTime, 1);
+        
+        if (holdProgress === 1 && !this.cooldownTimer) {
+          // Set cooldown
+          this.cooldownTimer = setTimeout(() => {
+            this.cooldownTimer = null;
+            this.lastGesture = null;
+          }, 1000);
+          
+          return {
+            name: gesture.categoryName,
+            confidence: gesture.score,
+            holdProgress: 1,
+            shouldTrigger: true
+          };
+        }
+        
+        return {
+          name: gesture.categoryName,
+          confidence: gesture.score,
+          holdProgress,
+          shouldTrigger: false
+        };
       }
-    }
-
-    Object.assign(ns, u);
-    localStorage.setItem('settings', JSON.stringify(ns));
-    return { settings: ns };
-  }),
-
-  resetSettings: () => set(() => {
-    localStorage.removeItem('settings');
-    return { settings: { ...DEFAULT_SETTINGS } };
-  }),
-
-  /* log */
-  logs: [],
-  pushLog: l => set(st => ({ logs: [l, ...st.logs.slice(0, 49)] })),
-
-  /* blackjack state */
-  balance: CONFIG.startingBalance,
-  bet    : CONFIG.defaultBet,
-  deck   : [],
-  playerHand: [],
-  dealerHand: [],
-  phase  : 'betting',
-  showDealer: false,
-  msg    : 'Place your bet to start!',
-  winStreak: 0,
-  lastWin: false,
-
-  setBet: v => set(() => ({
-    bet: Math.min(Math.max(CONFIG.minBet, v || 0), get().balance)
-  })),
-
-  deal: () => {
-    const { bet, balance, settings } = get();
-    if (bet > balance || bet < CONFIG.minBet) return;
-
-    if (settings.vibration) vibrate(50);
-
-    const deck = createDeck();
-    const player = [deck.pop()!, deck.pop()!];
-    const dealer = [deck.pop()!, deck.pop()!];
-
-    set({
-      deck,
-      playerHand: [],
-      dealerHand: [],
-      balance: balance - bet,
-      phase: 'dealing',
-      showDealer: false,
-      msg: 'Dealing cards...'
-    });
-
-    /* sequential dealing animation */
-    const later = (fn: () => void, t: number) => setTimeout(fn, t);
-    later(() => set({ playerHand: [player[0]] }), 300);
-    later(() => set({ dealerHand: [dealer[0]] }), 700);
-    later(() => set({ playerHand: player }), 1100);
-    later(() => set({ dealerHand: dealer }), 1500);
-    later(() => get().checkBJ(player, dealer), 2100);
-  },
-
-  checkBJ: (p, d) => {
-    const pv = calc(p);
-    const dv = calc(d);
-
-    if (pv === 21 || dv === 21) {
-      set({ showDealer: true });
-
-      if (pv === 21 && dv === 21) {
-        get().end('Push! Both have Blackjack.', get().bet);
-      } else if (pv === 21) {
-        get().end(`Blackjack! You win $${Math.floor(get().bet * CONFIG.blackjackPayout)}!`,
-                  get().bet * (1 + CONFIG.blackjackPayout));
-      } else {
-        get().end('Dealer has Blackjack. You lose.', 0);
+      
+      // No gesture detected
+      if (!this.cooldownTimer) {
+        this.lastGesture = null;
       }
-    } else {
-      set({ phase: 'playing', msg: 'Your turn - make your move!' });
+      return null;
+    } catch (error) {
+      return null;
     }
-  },
-
-  hit: () => {
-    if (get().phase !== 'playing') return;
-
-    const deck = [...get().deck];
-    const hand = [...get().playerHand, deck.pop()!];
-
-    set({ deck, playerHand: hand });
-
-    const val = calc(hand);
-    if (val === 21) {
-      set({ msg: '21! Standing automatically...' });
-      setTimeout(() => get().stand(), 600);
-    } else if (val > 21) {
-      setTimeout(() => get().end('Bust! You went over 21.', 0), 600);
+  }
+  
+  async close() {
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
     }
-  },
-
-  stand: () => {
-    if (get().phase !== 'playing') return;
-
-    set({ phase: 'dealer', showDealer: true, msg: "Dealer's turn..." });
-    setTimeout(() => get().dealerPlay(), 1000);
-  },
-
-  double: () => {
-    const { phase, bet, balance, playerHand, settings } = get();
-    if (phase !== 'playing') return;
-
-    if (playerHand.length !== 2) {
-      toast.error('Double Down only on first turn!', {
-        icon: '🚫',
-        style: {
-          borderRadius: '10px',
-          background: '#333',
-          color: '#fff',
-        }
-      });
-      return;
+    if (this.recognizer) {
+      await this.recognizer.close();
+      this.recognizer = null;
+      this.ready = false;
     }
+  }
+}
 
-    if (balance < bet) {
-      toast.error('Not enough chips to double!', {
-        icon: '💸',
-        style: {
-          borderRadius: '10px',
-          background: '#333',
-          color: '#fff',
-        }
-      });
-      return;
-    }
-
-    if (settings.vibration) vibrate([50, 50, 50]);
-
-    const deck = [...get().deck];
-    const hand = [...playerHand, deck.pop()!];
-    set({ deck, playerHand: hand, balance: balance - bet, bet: bet * 2 });
-    setTimeout(() => get().stand(), 600);
-  },
-
-  dealerPlay: () => {
-    const { deck, dealerHand } = get();
-
-    if (calc(dealerHand) >= CONFIG.dealerStandsOn) {
-      return get().end();
-    }
-
-    dealerHand.push(deck.pop()!);
-    set({ deck: [...deck], dealerHand: [...dealerHand] });
-    setTimeout(() => get().dealerPlay(), 800);
-  },
-
-  end: (msg = '', win = null) => {
-    const { playerHand, dealerHand, bet, balance, winStreak, settings } = get();
-
-    if (win === null) {
-      const pv = calc(playerHand);
-      const dv = calc(dealerHand);
-
-      if (pv > 21)       { msg = 'Bust! You went over 21.'; win = 0; }
-      else if (dv > 21)  { msg = 'Dealer busts! You win!';  win = bet * 2; }
-      else if (pv > dv)  { msg = 'You win! Higher hand!';   win = bet * 2; }
-      else if (pv < dv)  { msg = 'Dealer wins.';            win = 0; }
-      else               { msg = 'Push! It\'s a tie.';       win = bet; }
-    }
-
-    const isWin = win > bet;
-    const newStreak = isWin ? winStreak + 1 : 0;
-
-    if (settings.vibration) {
-      vibrate(isWin ? [100, 50, 100] : [200]);
-    }
-
-    set({ 
-      balance: balance + (win ?? 0), 
-      phase: 'ended', 
-      msg, 
-      showDealer: true,
-      winStreak: newStreak,
-      lastWin: isWin
-    });
-
-    if (newStreak >= 3) {
-      toast.success(`${newStreak} wins in a row! 🔥`, {
-        icon: '🎯',
-        style: {
-          borderRadius: '10px',
-          background: '#333',
-          color: '#fff',
-        }
-      });
-    }
-  },
-
-  next: () => {
-    const bal = get().balance;
-    if (bal < CONFIG.minBet) {
-      return set({ phase: 'ended', msg: 'Game over! Out of chips.' });
-    }
-
-    set({
+/* ── Zustand Stores ────────────────────────────────────────────────────────── */
+const useGameStore = create<GameState>()(
+  persist(
+    (set, get) => ({
+      balance: GAME_CONFIG.initialBalance,
+      bet: 50,
       deck: [],
-      playerHand: [],
-      dealerHand: [],
-      phase: 'betting',
-      msg: 'Place your bet!',
-      bet: Math.min(get().bet, bal),
-      lastWin: false
-    });
-  },
-
-  reset: () => set({
-    balance: CONFIG.startingBalance,
-    bet: CONFIG.defaultBet,
-    deck: [],
-    playerHand: [],
-    dealerHand: [],
-    phase: 'betting',
-    showDealer: false,
-    msg: 'Welcome back! Place your bet.',
-    winStreak: 0,
-    lastWin: false
-  })
-}));
-
-/* ── 6 · calibration wizard ───────────────────────────────────────────────── */
-const Ring: React.FC<{ progress: number }> = ({ progress }) => {
-  const circumference = 2 * Math.PI * 54;
-  const strokeDashoffset = circumference - (progress * circumference);
-
-  return (
-    <svg viewBox="0 0 120 120" className="w-32 h-32">
-      <defs>
-        <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stopColor="#ec4899" />
-          <stop offset="100%" stopColor="#3b82f6" />
-        </linearGradient>
-      </defs>
-      <circle
-        cx="60"
-        cy="60"
-        r="54"
-        stroke="rgba(255,255,255,0.1)"
-        strokeWidth="8"
-        fill="none"
-      />
-      <motion.circle
-        cx="60"
-        cy="60"
-        r="54"
-        stroke="url(#ringGradient)"
-        strokeWidth="8"
-        fill="none"
-        strokeLinecap="round"
-        strokeDasharray={circumference}
-        strokeDashoffset={strokeDashoffset}
-        initial={{ rotate: -90 }}
-        style={{ transformOrigin: '60px 60px' }}
-      />
-    </svg>
-  );
-};
-
-const Calibrate: React.FC<{ onClose: () => void }> = ({ onClose }) => {
-  const steps = [
-    { label: 'Hit',    key: 'hitGesture' as const,    icon: '✋' },
-    { label: 'Stand',  key: 'standGesture' as const,  icon: '✊' },
-    { label: 'Double', key: 'doubleGesture' as const, icon: '👎' }
-  ];
-
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const recogRef = useRef<MediaPipeRecognizer>();
-  const rafRef   = useRef<number>();
-  const startMs  = useRef<number>(0);
-
-  const [ready, setReady] = useState(false);
-  const [det, setDet]     = useState<RawGesture | null>(null);
-  const [prog, setProg]   = useState(0);
-  const [idx, setIdx]     = useState(0);
-  const [error, setError] = useState<string | null>(null);
-
-  const { settings, updateSettings } = useGame();
-
-  useEffect(() => {
-    let live = true;
-
-    (async () => {
-      try {
-        setError(null);
-        const r = new MediaPipeRecognizer();
-        await r.init(videoRef.current!);
-        if (!live) return r.close();
-        recogRef.current = r;
-
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: 'user'
-          } 
+      playerCards: [],
+      dealerCards: [],
+      phase: 'waiting',
+      dealerRevealed: false,
+      message: 'Place your bet to start',
+      lastResult: null,
+      isAnimating: false,
+      stats: {
+        handsPlayed: 0,
+        handsWon: 0,
+        totalWinnings: 0,
+        bestStreak: 0,
+        currentStreak: 0
+      },
+      
+      placeBet: (amount: number) => {
+        const validBet = Math.max(
+          GAME_CONFIG.minBet, 
+          Math.min(amount, Math.min(get().balance, GAME_CONFIG.maxBet))
+        );
+        set({ bet: validBet });
+      },
+      
+      deal: () => {
+        const { bet, balance, phase, stats, isAnimating } = get();
+        if (phase !== 'waiting' || bet > balance || isAnimating) return;
+        
+        set({ isAnimating: true });
+        
+        const deck = createDeck();
+        const playerCards = [deck.pop()!, deck.pop()!];
+        const dealerCards = [deck.pop()!, deck.pop()!];
+        
+        set({
+          deck,
+          playerCards: [],
+          dealerCards: [],
+          balance: balance - bet,
+          phase: 'dealing',
+          dealerRevealed: false,
+          message: 'Dealing...',
+          lastResult: null,
+          stats: { ...stats, handsPlayed: stats.handsPlayed + 1 }
         });
         
-        if (!live) {
-          stream.getTracks().forEach(t => t.stop());
+        // Animate dealing
+        const dealSequence = async () => {
+          soundManager.play('deal');
+          
+          await new Promise(r => setTimeout(r, 300));
+          set({ playerCards: [playerCards[0]] });
+          
+          await new Promise(r => setTimeout(r, 300));
+          set({ dealerCards: [dealerCards[0]] });
+          
+          await new Promise(r => setTimeout(r, 300));
+          set({ playerCards });
+          
+          await new Promise(r => setTimeout(r, 300));
+          set({ dealerCards });
+          
+          await new Promise(r => setTimeout(r, 400));
+          
+          const playerValue = calculateHandValue(playerCards);
+          const dealerValue = calculateHandValue(dealerCards);
+          
+          if (playerValue === 21 || dealerValue === 21) {
+            set({ dealerRevealed: true });
+            
+            if (playerValue === 21 && dealerValue === 21) {
+              set({
+                phase: 'game-over',
+                message: 'Push! Both have Blackjack',
+                balance: get().balance + bet,
+                lastResult: 'push',
+                isAnimating: false
+              });
+            } else if (playerValue === 21) {
+              const winAmount = Math.floor(bet * (1 + GAME_CONFIG.blackjackPayout));
+              const currentStats = get().stats;
+              set({
+                phase: 'game-over',
+                message: `Blackjack! You win $${winAmount}`,
+                balance: get().balance + winAmount,
+                lastResult: 'win',
+                isAnimating: false,
+                stats: {
+                  ...currentStats,
+                  handsWon: currentStats.handsWon + 1,
+                  totalWinnings: currentStats.totalWinnings + winAmount - bet,
+                  currentStreak: currentStats.currentStreak + 1,
+                  bestStreak: Math.max(currentStats.bestStreak, currentStats.currentStreak + 1)
+                }
+              });
+              soundManager.play('win');
+            } else {
+              const currentStats = get().stats;
+              set({
+                phase: 'game-over',
+                message: 'Dealer has Blackjack',
+                lastResult: 'loss',
+                isAnimating: false,
+                stats: { ...currentStats, currentStreak: 0 }
+              });
+              soundManager.play('lose');
+            }
+          } else {
+            set({ phase: 'playing', message: 'Your turn', isAnimating: false });
+          }
+        };
+        
+        dealSequence();
+      },
+      
+      hit: () => {
+        const { phase, deck, playerCards, isAnimating } = get();
+        if (phase !== 'playing' || deck.length === 0 || isAnimating) return;
+        
+        set({ isAnimating: true });
+        
+        const newCard = deck.pop()!;
+        const newPlayerCards = [...playerCards, newCard];
+        const newDeck = [...deck];
+        
+        set({
+          deck: newDeck,
+          playerCards: newPlayerCards
+        });
+        
+        soundManager.play('deal');
+        
+        setTimeout(() => {
+          const value = calculateHandValue(newPlayerCards);
+          
+          if (value > 21) {
+            const currentStats = get().stats;
+            set({
+              phase: 'game-over',
+              message: 'Bust! You went over 21',
+              dealerRevealed: true,
+              lastResult: 'loss',
+              isAnimating: false,
+              stats: { ...currentStats, currentStreak: 0 }
+            });
+            soundManager.play('lose');
+          } else if (value === 21) {
+            set({ message: '21! Standing...', isAnimating: false });
+            setTimeout(() => get().stand(), 600);
+          } else {
+            set({ isAnimating: false });
+          }
+        }, 400);
+      },
+      
+      stand: () => {
+        const { phase, isAnimating } = get();
+        if (phase !== 'playing' || isAnimating) return;
+        
+        set({
+          phase: 'dealer-turn',
+          dealerRevealed: true,
+          message: "Dealer's turn",
+          isAnimating: true
+        });
+        
+        const dealerPlay = async () => {
+          await new Promise(r => setTimeout(r, 600));
+          
+          const playDealer = () => {
+            const { deck, dealerCards, playerCards, bet, balance, stats } = get();
+            const dealerValue = calculateHandValue(dealerCards);
+            
+            if (dealerValue >= GAME_CONFIG.dealerStandValue || deck.length === 0) {
+              const playerValue = calculateHandValue(playerCards);
+              let message = '';
+              let winAmount = 0;
+              let result: 'win' | 'loss' | 'push';
+              let newStats = { ...stats };
+              
+              if (dealerValue > 21) {
+                message = 'Dealer busts! You win';
+                winAmount = bet * 2;
+                result = 'win';
+                newStats.handsWon++;
+                newStats.totalWinnings += bet;
+                newStats.currentStreak++;
+                newStats.bestStreak = Math.max(newStats.bestStreak, newStats.currentStreak);
+              } else if (playerValue > dealerValue) {
+                message = 'You win!';
+                winAmount = bet * 2;
+                result = 'win';
+                newStats.handsWon++;
+                newStats.totalWinnings += bet;
+                newStats.currentStreak++;
+                newStats.bestStreak = Math.max(newStats.bestStreak, newStats.currentStreak);
+              } else if (playerValue < dealerValue) {
+                message = 'Dealer wins';
+                winAmount = 0;
+                result = 'loss';
+                newStats.currentStreak = 0;
+              } else {
+                message = 'Push!';
+                winAmount = bet;
+                result = 'push';
+              }
+              
+              set({
+                phase: 'game-over',
+                message,
+                balance: balance + winAmount,
+                lastResult: result,
+                stats: newStats,
+                isAnimating: false
+              });
+              
+              soundManager.play(result === 'win' ? 'win' : 'lose');
+            } else {
+              const newCard = deck.pop()!;
+              set({
+                deck: [...deck],
+                dealerCards: [...dealerCards, newCard]
+              });
+              
+              soundManager.play('deal');
+              setTimeout(playDealer, 800);
+            }
+          };
+          
+          playDealer();
+        };
+        
+        dealerPlay();
+      },
+      
+      double: () => {
+        const { phase, playerCards, bet, balance, isAnimating } = get();
+        if (phase !== 'playing' || playerCards.length !== 2 || balance < bet || isAnimating) return;
+        
+        set({ balance: balance - bet, bet: bet * 2 });
+        get().hit();
+        
+        setTimeout(() => {
+          const { playerCards: newCards, phase: currentPhase } = get();
+          const value = calculateHandValue(newCards);
+          if (value <= 21 && currentPhase === 'playing') {
+            get().stand();
+          }
+        }, 600);
+      },
+      
+      nextRound: () => {
+        const { balance } = get();
+        
+        if (balance < GAME_CONFIG.minBet) {
+          set({
+            phase: 'game-over',
+            message: 'Game Over! Out of chips'
+          });
           return;
         }
-
-        videoRef.current!.srcObject = stream;
-        videoRef.current!.onloadedmetadata = () => setReady(true);
-      } catch (e) {
-        setError('Camera access denied. Please allow camera permissions.');
-        console.error(e);
-      }
-    })();
-
-    return () => {
-      live = false;
-      recogRef.current?.close();
-      const media = videoRef.current?.srcObject as MediaStream | null;
-      media?.getTracks().forEach(t => t.stop());
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!ready || !recogRef.current) return;
-
-    const loop = (ts: number) => {
-      if (idx >= steps.length) {
-        toast.success('Calibration complete! 🎉', {
-          style: {
-            borderRadius: '10px',
-            background: '#333',
-            color: '#fff',
+        
+        set({
+          deck: [],
+          playerCards: [],
+          dealerCards: [],
+          phase: 'waiting',
+          dealerRevealed: false,
+          message: 'Place your bet',
+          bet: Math.min(get().bet, balance),
+          lastResult: null
+        });
+      },
+      
+      reset: () => {
+        set({
+          balance: GAME_CONFIG.initialBalance,
+          bet: 50,
+          deck: [],
+          playerCards: [],
+          dealerCards: [],
+          phase: 'waiting',
+          dealerRevealed: false,
+          message: 'Place your bet to start',
+          lastResult: null,
+          isAnimating: false,
+          stats: {
+            handsPlayed: 0,
+            handsWon: 0,
+            totalWinnings: 0,
+            bestStreak: 0,
+            currentStreak: 0
           }
         });
+      }
+    }),
+    {
+      name: 'blackjack-game',
+      partialize: (state) => ({ 
+        balance: state.balance, 
+        stats: state.stats,
+        bet: state.bet
+      })
+    }
+  )
+);
+
+const useSettingsStore = create<{
+  settings: Settings;
+  updateSettings: (updates: Partial<Settings>) => void;
+}>()(
+  persist(
+    (set) => ({
+      settings: DEFAULT_SETTINGS,
+      updateSettings: (updates) => set((state) => ({
+        settings: { ...state.settings, ...updates }
+      }))
+    }),
+    {
+      name: 'blackjack-settings'
+    }
+  )
+);
+
+const useCalibrationStore = create<{
+  calibrationData: CalibrationData | null;
+  gestureLogs: GestureLog[];
+  addCalibrationSample: (gesture: string, sample: GestureSample) => void;
+  clearCalibration: () => void;
+  addGestureLog: (log: GestureLog) => void;
+  clearLogs: () => void;
+}>()(
+  persist(
+    (set, get) => ({
+      calibrationData: null,
+      gestureLogs: [],
+      
+      addCalibrationSample: (gesture: string, sample: GestureSample) => {
+        const current = get().calibrationData || {
+          samples: {},
+          createdAt: Date.now(),
+          version: '1.0'
+        };
+        
+        if (!current.samples[gesture]) {
+          current.samples[gesture] = [];
+        }
+        
+        current.samples[gesture].push(sample);
+        
+        if (current.samples[gesture].length > 5) {
+          current.samples[gesture].shift();
+        }
+        
+        set({ calibrationData: current });
+      },
+      
+      clearCalibration: () => {
+        set({ calibrationData: null });
+      },
+      
+      addGestureLog: (log: GestureLog) => {
+        set((state) => ({
+          gestureLogs: [...state.gestureLogs.slice(-49), log]
+        }));
+      },
+      
+      clearLogs: () => {
+        set({ gestureLogs: [] });
+      }
+    }),
+    {
+      name: 'blackjack-calibration'
+    }
+  )
+);
+
+/* ── Card Component ────────────────────────────────────────────────────────── */
+const Card = memo<{ card: Card; hidden?: boolean }>(({ card, hidden = false }) => {
+  const { highContrast } = useSettingsStore(s => s.settings);
+  const isRed = ['♥', '♦'].includes(card.suit);
+  
+  return (
+    <motion.div
+      initial={{ scale: 0, rotate: -180 }}
+      animate={{ scale: 1, rotate: 0 }}
+      exit={{ scale: 0 }}
+      className="relative"
+    >
+      <motion.div
+        className="w-16 h-24 sm:w-20 sm:h-28 relative preserve-3d"
+        animate={{ rotateY: hidden ? 180 : 0 }}
+        transition={{ duration: 0.6 }}
+        style={{ transformStyle: 'preserve-3d' }}
+      >
+        {/* Front */}
+        <div className={`absolute inset-0 backface-hidden ${
+          highContrast 
+            ? 'bg-white border-4 border-black' 
+            : 'bg-white border border-gray-200'
+        } rounded-lg shadow-lg flex flex-col items-center justify-between p-2`}
+        style={{ backfaceVisibility: 'hidden' }}>
+          <span className={`text-sm font-bold ${
+            isRed ? 'text-red-500' : 'text-black'
+          }`}>
+            {card.rank}
+          </span>
+          <span className={`text-3xl ${
+            isRed ? 'text-red-500' : 'text-black'
+          }`}>
+            {card.suit}
+          </span>
+          <span className={`text-sm font-bold rotate-180 ${
+            isRed ? 'text-red-500' : 'text-black'
+          }`}>
+            {card.rank}
+          </span>
+        </div>
+        
+        {/* Back */}
+        <div className={`absolute inset-0 backface-hidden ${
+          highContrast 
+            ? 'bg-blue-900 border-4 border-black' 
+            : 'bg-gradient-to-br from-blue-600 to-blue-800'
+        } rounded-lg shadow-lg`}
+        style={{ 
+          backfaceVisibility: 'hidden',
+          transform: 'rotateY(180deg)'
+        }}>
+          <div className="w-full h-full rounded-lg border border-white/20 flex items-center justify-center">
+            <div className="text-white/10 text-4xl">♠</div>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+});
+
+/* ── Calibration Wizard ────────────────────────────────────────────────────── */
+const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const [step, setStep] = useState(0);
+  const [recording, setRecording] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [recognizerReady, setRecognizerReady] = useState(false);
+  
+  const { settings } = useSettingsStore();
+  const { addCalibrationSample } = useCalibrationStore();
+  
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const recognizerRef = useRef<GestureRecognizer | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  
+  const gestures = [
+    { key: 'hitGesture', label: 'Hit', icon: '✋' },
+    { key: 'standGesture', label: 'Stand', icon: '✊' },
+    { key: 'doubleGesture', label: 'Double', icon: '👎' }
+  ];
+  
+  useEffect(() => {
+    let mounted = true;
+    
+    const initCamera = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { 
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
+          }
+        });
+        
+        if (!mounted) {
+          stream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        
+        streamRef.current = stream;
+        
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          
+          // Wait for video to be ready and playing
+          await new Promise<void>((resolve) => {
+            if (videoRef.current) {
+              videoRef.current.onloadedmetadata = async () => {
+                try {
+                  await videoRef.current!.play();
+                  if (mounted) {
+                    setCameraReady(true);
+                    resolve();
+                  }
+                } catch (error) {
+                  console.error('Failed to play video:', error);
+                }
+              };
+            }
+          });
+          
+          // Now initialize MediaPipe with the playing video
+          if (mounted && videoRef.current) {
+            const recognizer = new GestureRecognizer();
+            await recognizer.init(videoRef.current);
+            
+            if (mounted) {
+              recognizerRef.current = recognizer;
+              setRecognizerReady(true);
+            } else {
+              await recognizer.close();
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Failed to initialize camera:', error);
+        toast.error('Camera access denied. Please allow camera access and reload.');
         onClose();
+      }
+    };
+    
+    initCamera();
+    
+    return () => {
+      mounted = false;
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+      }
+      if (recognizerRef.current) {
+        recognizerRef.current.close();
+      }
+    };
+  }, [onClose]);
+  
+  const startRecording = async () => {
+    if (recording || !recognizerRef.current || !videoRef.current) return;
+    
+    setCountdown(3);
+    
+    for (let i = 3; i > 0; i--) {
+      setCountdown(i);
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    
+    setCountdown(0);
+    setRecording(true);
+    
+    const samples: GestureSample[] = [];
+    const startTime = Date.now();
+    const targetGesture = settings[gestures[step].key as keyof Settings] as string;
+    let frameCounter = 0;
+    
+    const recordLoop = () => {
+      if (Date.now() - startTime > 3000 || !recognizerRef.current || !videoRef.current) {
+        setRecording(false);
+        
+        if (samples.length > 0) {
+          const bestSample = samples[0];
+          addCalibrationSample(targetGesture, bestSample);
+          toast.success(`Recorded ${gestures[step].label} gesture!`);
+          
+          if (step < gestures.length - 1) {
+            setStep(step + 1);
+          } else {
+            toast.success('Calibration complete!');
+            setTimeout(onClose, 1000);
+          }
+        } else {
+          toast.error(`No ${targetGesture} gesture detected. Try again.`);
+        }
         return;
       }
-
-      const g = recogRef.current!.recognise(ts);
-
-      if (g && g.categoryName === settings[steps[idx].key] && g.score >= 0.9) {
-        toast.success(`${steps[idx].label} already perfect! ✨`);
-        setIdx(i => i + 1);
-        setProg(0);
-        setDet(null);
-        return (rafRef.current = requestAnimationFrame(loop));
-      }
-
-      if (g && g.score >= 0.7) {
-        if (!det || det.categoryName !== g.categoryName) {
-          startMs.current = performance.now();
-          vibrate(50);
+      
+      // Only process every 3rd frame for performance
+      if (frameCounter++ % 3 === 0) {
+        const result = recognizerRef.current.recognize(videoRef.current!, performance.now());
+        if (result && result.name === targetGesture && result.confidence > 0.8) {
+          samples.push({
+            gesture: result.name,
+            landmarks: [],
+            timestamp: Date.now()
+          });
         }
-        setDet(g);
-        const p = Math.min((performance.now() - startMs.current) / 800, 1);
-        setProg(p);
-
-        if (p === 1) {
-          const tgt = steps[idx].key;
-          if (Object.values(settings).includes(g.categoryName) && settings[tgt] !== g.categoryName) {
-            toast.error('Gesture already used!');
-            vibrate([100, 50, 100]);
-          } else {
-            updateSettings({ [tgt]: g.categoryName });
-            toast.success(`${steps[idx].label} set to ${g.categoryName.replace(/_/g, ' ')}`);
-            vibrate([50, 50]);
-            setIdx(i => i + 1);
-          }
-          setDet(null);
-          setProg(0);
-        }
-      } else {
-        setDet(null);
-        setProg(0);
       }
-
-      rafRef.current = requestAnimationFrame(loop);
+      
+      requestAnimationFrame(recordLoop);
     };
-
-    rafRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafRef.current!);
-  }, [ready, idx, settings, updateSettings, onClose, det]);
-
-  const current = steps[idx];
-
+    
+    requestAnimationFrame(recordLoop);
+  };
+  
+  const currentGesture = gestures[step];
+  const isReady = cameraReady && recognizerReady;
+  
   return (
-    <motion.div 
+    <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-black/90 backdrop-blur-md flex items-center justify-center z-50 p-4"
+      className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50"
     >
-      <motion.div 
-        initial={{ scale: 0.9, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        className="bg-gradient-to-br from-gray-900 to-gray-800 w-full max-w-lg rounded-2xl shadow-2xl overflow-hidden border border-gray-700"
+      <motion.div
+        initial={{ scale: 0.9 }}
+        animate={{ scale: 1 }}
+        className="bg-gray-800 rounded-xl max-w-2xl w-full overflow-hidden"
       >
-        <div className="bg-gradient-to-r from-pink-600 to-blue-600 px-6 py-4 flex justify-between items-center">
-          <h2 className="text-xl font-bold text-white">
-            Gesture Calibration {current && `- ${current.icon}`}
-          </h2>
-          <button
-            onClick={onClose}
-            className="text-white/80 hover:text-white transition-colors text-2xl"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="aspect-video bg-black relative">
-          <video 
-            ref={videoRef} 
-            autoPlay 
-            playsInline 
-            muted 
-            className="w-full h-full object-cover"
-            style={{ transform: settings.leftHand ? 'scaleX(-1)' : 'none' }}
-          />
-          
-          {!ready && !error && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="text-center">
-                <div className="animate-spin rounded-full h-12 w-12 border-4 border-pink-500 border-t-transparent mx-auto mb-4" />
-                <p className="text-white">Initializing camera...</p>
-              </div>
-            </div>
-          )}
-
-          {error && (
-            <div className="absolute inset-0 flex items-center justify-center p-8">
-              <div className="text-center text-red-400">
-                <p className="text-6xl mb-4">📷</p>
-                <p>{error}</p>
-              </div>
-            </div>
-          )}
-
-          {det && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="text-center">
-                <Ring progress={prog} />
-                <motion.p 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="text-white mt-4 text-lg font-semibold"
-                >
-                  {det.categoryName.replace(/_/g, ' ')}
-                </motion.p>
-              </div>
-            </div>
-          )}
-
-          {/* Progress indicators */}
-          <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 flex gap-2">
-            {steps.map((_, i) => (
-              <div
-                key={i}
-                className={`h-2 w-12 rounded-full transition-all ${
-                  i < idx ? 'bg-green-500' : i === idx ? 'bg-pink-500' : 'bg-gray-600'
-                }`}
-              />
-            ))}
+        <div className="p-6 border-b border-gray-700">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold">Calibrate Gestures</h2>
+            <button
+              onClick={onClose}
+              className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+            >
+              ✕
+            </button>
           </div>
         </div>
-
-        <div className="p-6 text-center">
-          {current ? (
-            <>
-              <p className="text-white text-lg mb-2">
-                Show the <span className="font-bold text-pink-400">{current.label}</span> gesture
-              </p>
-              <p className="text-gray-400">
-                Hold steady until the ring completes
-              </p>
-            </>
-          ) : (
-            <p className="text-green-400 text-lg">All done! Let's play!</p>
+        
+        <div className="aspect-video bg-black relative">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className={`w-full h-full object-cover ${cameraReady ? 'opacity-100' : 'opacity-0'}`}
+          />
+          
+          {!isReady && (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
+                <p className="text-gray-400">
+                  {!cameraReady ? 'Initializing camera...' : 'Loading gesture recognition...'}
+                </p>
+              </div>
+            </div>
           )}
+          
+          {countdown > 0 && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/50">
+              <motion.div
+                key={countdown}
+                initial={{ scale: 0.5, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 1.5, opacity: 0 }}
+                className="text-8xl font-bold text-white"
+              >
+                {countdown}
+              </motion.div>
+            </div>
+          )}
+          
+          {recording && (
+            <div className="absolute top-4 right-4 flex items-center gap-2 bg-red-600 px-3 py-1 rounded-full">
+              <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
+              <span className="text-sm font-medium">Recording...</span>
+            </div>
+          )}
+        </div>
+        
+        <div className="p-6">
+          <div className="flex justify-center gap-4 mb-6">
+            {gestures.map((g, i) => (
+              <div
+                key={g.key}
+                className={`px-4 py-2 rounded-full transition-colors ${
+                  i === step ? 'bg-blue-600' : 
+                  i < step ? 'bg-green-600' : 'bg-gray-700'
+                }`}
+              >
+                {g.icon} {g.label}
+              </div>
+            ))}
+          </div>
+          
+          <div className="text-center">
+            <p className="text-xl mb-2">
+              Show the <span className="font-bold text-blue-400">{currentGesture.label}</span> gesture
+            </p>
+            <p className="text-gray-400 mb-6">
+              Make the {settings[currentGesture.key as keyof Settings]} gesture
+            </p>
+            <button
+              onClick={startRecording}
+              disabled={recording || countdown > 0 || !isReady}
+              className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
+            >
+              {recording ? 'Recording...' : countdown > 0 ? 'Get Ready...' : 'Start Recording'}
+            </button>
+          </div>
         </div>
       </motion.div>
     </motion.div>
   );
 };
 
-/* ── 7 · card component ───────────────────────────────────────────────────── */
-const CardComponent = memo<{ rank: Rank; suit: Suit; hidden?: boolean }>(
-  ({ rank, suit, hidden = false }) => {
-    const color = ['♥', '♦'].includes(suit) ? 'text-red-500' : 'text-gray-900';
-    const theme = useGame(s => s.settings.theme);
-
-    return (
-      <motion.div
-        layout
-        initial={{ scale: 0, y: -100, rotate: -180 }}
-        animate={{ scale: 1, y: 0, rotate: 0 }}
-        exit={{ scale: 0, y: 100, opacity: 0 }}
-        transition={{ 
-          type: 'spring', 
-          stiffness: 260, 
-          damping: 20,
-          rotate: { type: 'spring', stiffness: 100 }
-        }}
-        whileHover={{ y: -10, transition: { duration: 0.2 } }}
-        className="relative w-20 h-28 sm:w-24 sm:h-36 md:w-28 md:h-40 [perspective:1000px]"
-      >
-        <motion.div
-          className="relative w-full h-full transition-transform duration-700 [transform-style:preserve-3d]"
-          animate={{ rotateY: hidden ? 180 : 0 }}
-          transition={{ duration: 0.6, ease: 'easeInOut' }}
-        >
-          {/* Front of card */}
-          <div
-            className={`absolute inset-0 [backface-visibility:hidden] ${
-              theme === 'neon' 
-                ? 'bg-gradient-to-br from-white to-gray-100' 
-                : 'bg-white'
-            } rounded-xl shadow-2xl flex flex-col justify-between p-2 sm:p-3 font-bold ${color} border border-gray-200`}
-          >
-            <div className="text-sm sm:text-base">{rank}{suit}</div>
-            <div className="text-4xl sm:text-5xl md:text-6xl text-center">{suit}</div>
-            <div className="text-sm sm:text-base rotate-180 self-end">{rank}{suit}</div>
-          </div>
-          
-          {/* Back of card */}
-          <div
-            className={`absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)] rounded-xl shadow-2xl ${
-              theme === 'neon'
-                ? 'bg-gradient-to-br from-purple-600 via-pink-600 to-blue-600'
-                : theme === 'classic'
-                ? 'bg-gradient-to-br from-red-800 to-red-900'
-                : 'bg-gradient-to-br from-gray-800 to-gray-900'
-            }`}
-          >
-            <div className="w-full h-full rounded-xl border-2 border-white/20 flex items-center justify-center">
-              <div className="text-white/20 text-6xl">♠</div>
-            </div>
-          </div>
-        </motion.div>
-      </motion.div>
-    );
-  }
-);
-
-/* ── 8 · sound system ──────────────────────────────────────────────────────── */
-class SoundSystem {
-  private sounds: Record<string, HTMLAudioElement> = {};
-  private initialized = false;
-
-  constructor() {
-    const soundUrls = {
-      hit: 'https://assets.mixkit.co/active_storage/sfx/2003/2003-preview.mp3',
-      stand: 'https://assets.mixkit.co/active_storage/sfx/2018/2018-preview.mp3',
-      double: 'https://assets.mixkit.co/active_storage/sfx/2000/2000-preview.mp3',
-      win: 'https://assets.mixkit.co/active_storage/sfx/1435/1435-preview.mp3',
-      lose: 'https://assets.mixkit.co/active_storage/sfx/2012/2012-preview.mp3',
-      deal: 'https://assets.mixkit.co/active_storage/sfx/2004/2004-preview.mp3'
-    };
-
-    Object.entries(soundUrls).forEach(([key, url]) => {
-      const audio = new Audio(url);
-      audio.crossOrigin = 'anonymous';
-      audio.volume = 0.3;
-      this.sounds[key] = audio;
-    });
-  }
-
-  async init() {
-    if (this.initialized) return;
-    
-    try {
-      await Promise.all(
-        Object.values(this.sounds).map(audio => {
-          audio.volume = 0;
-          return audio.play().then(() => {
-            audio.pause();
-            audio.currentTime = 0;
-            audio.volume = 0.3;
-          });
-        })
-      );
-      this.initialized = true;
-    } catch (e) {
-      console.warn('Sound init failed:', e);
-    }
-  }
-
-  play(key: string, muted: boolean) {
-    if (!muted && this.sounds[key]) {
-      this.sounds[key].currentTime = 0;
-      this.sounds[key].play().catch(() => {});
-    }
-  }
-}
-
-const soundSystem = new SoundSystem();
-
-/* ── 9 · gesture hook ─────────────────────────────────────────────────────── */
-const useGesture = () => {
+/* ── Gesture Control Hook ──────────────────────────────────────────────────── */
+const useGestureControl = () => {
   const [enabled, setEnabled] = useState(false);
-  const [ready, setReady]     = useState(false);
-  const [gesture, setGesture] = useState<{ name: string; progress: number } | null>(null);
-  const [latency, setLatency] = useState(0);
-  const [handDetected, setHandDetected] = useState(true);
-
+  const [currentGesture, setCurrentGesture] = useState<string | null>(null);
+  const [gestureProgress, setGestureProgress] = useState(0);
+  
   const videoRef = useRef<HTMLVideoElement>(null);
-  const recogRef = useRef<MediaPipeRecognizer>();
-  const rafRef   = useRef<number>();
-  const noHandCount = useRef(0);
-
-  const G = useGame();
-  const { hitGesture, standGesture, doubleGesture, holdTime, confidence, autoLearn, muted, leftHand, vibration } = G.settings;
-
-  // Initialize sound system
-  useEffect(() => {
-    const initOnInteraction = () => {
-      soundSystem.init();
-      window.removeEventListener('pointerdown', initOnInteraction);
-    };
-    window.addEventListener('pointerdown', initOnInteraction, { once: true });
-  }, []);
-
-  // Suspend on hidden tab
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.hidden && enabled) {
-        setEnabled(false);
-        toast('Camera paused - tab hidden', { icon: '⏸️' });
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [enabled]);
-
-  // Camera management
+  const recognizerRef = useRef<GestureRecognizer | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const animationFrameRef = useRef<number>(0);
+  
+  const { settings } = useSettingsStore();
+  const game = useGameStore();
+  const { addGestureLog } = useCalibrationStore();
+  
+  // Initialize camera
   useEffect(() => {
     if (!enabled) {
-      recogRef.current?.close();
-      const media = videoRef.current?.srcObject as MediaStream | null;
-      media?.getTracks().forEach(t => t.stop());
-      setReady(false);
-      setGesture(null);
-      setHandDetected(true);
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      if (recognizerRef.current) {
+        recognizerRef.current.close();
+        recognizerRef.current = null;
+      }
+      setCurrentGesture(null);
+      setGestureProgress(0);
       return;
     }
-
-    let live = true;
-    (async () => {
+    
+    let mounted = true;
+    
+    const init = async () => {
       try {
-        const recog = new MediaPipeRecognizer();
-        await recog.init(videoRef.current!);
-        if (!live) return recog.close();
-        recogRef.current = recog;
-
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { 
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: 'user'
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 }
           }
         });
         
-        if (!live) {
-          stream.getTracks().forEach(t => t.stop());
+        if (!mounted) {
+          stream.getTracks().forEach(track => track.stop());
           return;
         }
         
-        videoRef.current!.srcObject = stream;
-        videoRef.current!.onloadedmetadata = () => setReady(true);
-      } catch (e) {
-        toast.error('Camera initialization failed', {
-          icon: '📷',
-          style: {
-            borderRadius: '10px',
-            background: '#333',
-            color: '#fff',
+        streamRef.current = stream;
+        
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          
+          await new Promise<void>((resolve) => {
+            if (videoRef.current) {
+              videoRef.current.onloadedmetadata = async () => {
+                try {
+                  await videoRef.current!.play();
+                  resolve();
+                } catch (error) {
+                  console.error('Failed to play video:', error);
+                }
+              };
+            }
+          });
+          
+          if (mounted && videoRef.current) {
+            const recognizer = new GestureRecognizer();
+            await recognizer.init(videoRef.current);
+            
+            if (mounted) {
+              recognizerRef.current = recognizer;
+            } else {
+              await recognizer.close();
+            }
           }
-        });
-        console.error(e);
+        }
+      } catch (error) {
+        console.error('Failed to initialize gesture control:', error);
+        toast.error('Camera access denied');
         setEnabled(false);
       }
-    })();
-
-    return () => { live = false; };
+    };
+    
+    init();
+    
+    return () => {
+      mounted = false;
+    };
   }, [enabled]);
-
+  
   // Recognition loop
   useEffect(() => {
-    if (!ready || !recogRef.current) return;
-
-    let last: string | null = null;
-    let start = 0;
-
-    const loop = (ts: number) => {
-      const t0 = performance.now();
-      const g = recogRef.current!.recognise(ts);
-      const latencyMs = performance.now() - t0;
-      setLatency(Math.round(latencyMs));
-
-      if (g && g.score >= confidence) {
-        noHandCount.current = 0;
-        setHandDetected(true);
-        
-        let cat = g.categoryName;
-        if (leftHand && cat === 'Thumb_Down') cat = 'Thumb_Up';
-        else if (leftHand && cat === 'Thumb_Up') cat = 'Thumb_Down';
-
-        if (cat !== last) {
-          last = cat;
-          start = Date.now();
-          if (vibration) vibrate(30);
-        }
-        
-        const progress = Math.min((Date.now() - start) / holdTime, 1);
-        setGesture({ name: cat, progress });
-
-        if (progress === 1) {
-          let actionTaken = false;
-          
-          if (G.phase === 'playing') {
-            if (cat === hitGesture) {
-              G.hit();
-              soundSystem.play('hit', muted);
-              actionTaken = true;
-            } else if (cat === standGesture) {
-              G.stand();
-              soundSystem.play('stand', muted);
-              actionTaken = true;
-            } else if (cat === doubleGesture) {
-              G.double();
-              soundSystem.play('double', muted);
-              actionTaken = true;
-            }
-          }
-          
-          if (actionTaken) {
-            G.pushLog({ 
-              t: new Date().toLocaleTimeString(), 
-              g: cat, 
-              score: +g.score.toFixed(2) 
-            });
-
-            if (vibration) vibrate([50, 30, 50]);
-
-            if (autoLearn && g.score < 0.9) {
-              const newC = Math.max(0.5, Math.min(0.9, g.score * 0.85));
-              G.updateSettings({ confidence: +newC.toFixed(2) });
-            }
-          }
-          
-          last = null;
-          setGesture(null);
-        }
-      } else {
-        setGesture(null);
-        
-        if (++noHandCount.current === 120) {
-          setHandDetected(false);
-          noHandCount.current = 0;
-        }
+    if (!enabled || !recognizerRef.current || !videoRef.current) return;
+    
+    let isActive = true;
+    let frameCounter = 0;
+    
+    const recognize = () => {
+      if (!isActive || !recognizerRef.current || !videoRef.current) return;
+      
+      // Skip frames for performance
+      if (frameCounter++ % 2 !== 0) {
+        animationFrameRef.current = requestAnimationFrame(recognize);
+        return;
       }
       
-      rafRef.current = requestAnimationFrame(loop);
+      const startTime = performance.now();
+      const result = recognizerRef.current.recognize(videoRef.current, performance.now());
+      const latency = performance.now() - startTime;
+      
+      if (result) {
+        setCurrentGesture(result.name);
+        setGestureProgress(result.holdProgress);
+        
+        if (result.shouldTrigger && game.phase === 'playing' && !game.isAnimating) {
+          let action: string | null = null;
+          
+          if (result.name === settings.hitGesture) {
+            game.hit();
+            action = 'hit';
+          } else if (result.name === settings.standGesture) {
+            game.stand();
+            action = 'stand';
+          } else if (result.name === settings.doubleGesture && 
+                     game.playerCards.length === 2 && 
+                     game.balance >= game.bet) {
+            game.double();
+            action = 'double';
+          }
+          
+          if (action) {
+            soundManager.play('gesture');
+            if (settings.vibrationEnabled && 'vibrate' in navigator) {
+              navigator.vibrate(50);
+            }
+            
+            addGestureLog({
+              timestamp: Date.now(),
+              gesture: result.name,
+              confidence: result.confidence,
+              action,
+              latency: Math.round(latency)
+            });
+          }
+        }
+      } else {
+        setCurrentGesture(null);
+        setGestureProgress(0);
+      }
+      
+      if (isActive) {
+        animationFrameRef.current = requestAnimationFrame(recognize);
+      }
     };
     
-    rafRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafRef.current!);
-  }, [
-    ready, confidence, holdTime, hitGesture, standGesture, 
-    doubleGesture, leftHand, muted, autoLearn, vibration, G
-  ]);
-
-  return { enabled, setEnabled, ready, videoRef, gesture, latency, handDetected };
+    animationFrameRef.current = requestAnimationFrame(recognize);
+    
+    return () => {
+      isActive = false;
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [enabled, settings, game, addGestureLog]);
+  
+  return {
+    enabled,
+    setEnabled,
+    videoRef,
+    currentGesture,
+    gestureProgress
+  };
 };
 
-/* ── 10 · Main App ─────────────────────────────────────────────────────────── */
+/* ── Main App Component ────────────────────────────────────────────────────── */
 const App: React.FC = () => {
-  const G = useGame();
-  const { enabled, setEnabled, ready, videoRef, gesture, latency, handDetected } = useGesture();
-
+  const game = useGameStore();
+  const { settings, updateSettings } = useSettingsStore();
+  const { calibrationData, gestureLogs, clearLogs } = useCalibrationStore();
+  const { enabled, setEnabled, videoRef, currentGesture, gestureProgress } = useGestureControl();
+  
   const [showSettings, setShowSettings] = useState(false);
-  const [showCalibrate, setShowCalibrate] = useState(false);
+  const [showCalibration, setShowCalibration] = useState(false);
+  const [showLogs, setShowLogs] = useState(false);
   const [showStats, setShowStats] = useState(false);
-
-  const theme = THEMES[G.settings.theme];
-  const mirror = G.settings.leftHand ? '' : '-scale-x-100';
-  const pVal = calc(G.playerHand);
-  const dVal = calc(G.dealerHand);
-  const gameOver = G.phase === 'ended' && G.balance < CONFIG.minBet;
-
-  // Keyboard shortcuts
+  const [betAmount, setBetAmount] = useState(game.bet);
+  
+  const playerValue = useMemo(() => calculateHandValue(game.playerCards), [game.playerCards]);
+  const dealerValue = useMemo(() => calculateHandValue(game.dealerCards), [game.dealerCards]);
+  const dealerVisibleValue = useMemo(() => 
+    game.dealerRevealed ? dealerValue : calculateHandValue(game.dealerCards.slice(1)),
+    [game.dealerRevealed, dealerValue, game.dealerCards]
+  );
+  
   useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (G.phase !== 'playing') return;
-      const k = e.key.toLowerCase();
-      if (k === 'h') G.hit();
-      if (k === 's') G.stand();
-      if (k === 'd') G.double();
-      if (k === 'g') setEnabled(!enabled);
-    };
-    
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [G, enabled, setEnabled]);
-
-  // Close calibration when gesture control is disabled
+    setBetAmount(game.bet);
+  }, [game.bet]);
+  
   useEffect(() => {
-    if (showCalibrate) setEnabled(false);
-  }, [showCalibrate, setEnabled]);
-
-  // Deal sound effect
-  useEffect(() => {
-    if (G.phase === 'dealing') {
-      soundSystem.play('deal', G.settings.muted);
-    }
-  }, [G.phase, G.settings.muted]);
-
-  // Win/lose sound effects
-  useEffect(() => {
-    if (G.phase === 'ended') {
-      soundSystem.play(G.lastWin ? 'win' : 'lose', G.settings.muted);
-    }
-  }, [G.phase, G.lastWin, G.settings.muted]);
-
+    soundManager.init();
+  }, []);
+  
   return (
-    <div className={`min-h-screen ${theme.bg} ${theme.text} overflow-hidden`}>
-      <Toaster 
-        position="bottom-center"
-        toastOptions={{
-          style: {
-            borderRadius: '10px',
-            background: '#333',
-            color: '#fff',
-          }
-        }}
-      />
+    <div className={`min-h-screen ${
+      settings.highContrast ? 'bg-black text-white' : 'bg-gray-900 text-white'
+    }`}>
+      <Toaster position="top-center" />
       
-      <AnimatePresence>
-        {showCalibrate && <Calibrate onClose={() => setShowCalibrate(false)} />}
-      </AnimatePresence>
-
-      {/* Animated background */}
-      <div className="absolute inset-0 overflow-hidden">
-        <div className="absolute -top-40 -right-40 w-80 h-80 bg-pink-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob" />
-        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-blue-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob animation-delay-2000" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob animation-delay-4000" />
-      </div>
-
-      <div className="relative z-10 min-h-screen p-4 flex flex-col">
-        {/* Header */}
-        <header className="text-center mb-6">
-          <motion.h1 
-            initial={{ y: -50, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            className="text-5xl md:text-6xl font-black mb-2 bg-gradient-to-r from-pink-400 to-blue-400 bg-clip-text text-transparent"
-          >
+      {/* Header */}
+      <header className={`border-b ${
+        settings.highContrast ? 'border-white' : 'border-gray-800'
+      } px-4 py-3`}>
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <h1 className="text-2xl font-bold flex items-center gap-2">
             Blackjack
-          </motion.h1>
-          <motion.div
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 0.2, type: 'spring' }}
-            className="flex items-center justify-center gap-4 text-xl"
-          >
-            <span className="opacity-80">Balance:</span>
-            <span className={`font-bold text-2xl ${G.balance > CONFIG.startingBalance ? 'text-green-400' : 'text-white'}`}>
-              ${G.balance}
-            </span>
-            {G.winStreak > 0 && (
-              <span className="text-yellow-400 animate-pulse">
-                🔥 {G.winStreak}
-              </span>
-            )}
-          </motion.div>
-        </header>
-
-        <main className="flex-grow grid lg:grid-cols-3 gap-6 max-w-7xl mx-auto w-full">
-          {/* Game Table */}
-          <div className={`lg:col-span-2 ${theme.table} rounded-2xl p-6 shadow-2xl backdrop-blur-xl`}>
-            {/* Dealer Section */}
+            {settings.privacyMode && <span className="text-sm text-green-400">🔒</span>}
+          </h1>
+          <div className="flex items-center gap-4">
+            <div className="text-sm">
+              <span className="text-gray-400">Balance:</span>
+              <span className="ml-2 font-mono font-bold text-lg">${game.balance}</span>
+            </div>
+            <button
+              onClick={() => setShowStats(true)}
+              className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+            >
+              Stats
+            </button>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+            >
+              Settings
+            </button>
+          </div>
+        </div>
+      </header>
+      
+      <main className="max-w-6xl mx-auto p-4 grid lg:grid-cols-3 gap-6">
+        {/* Game Table */}
+        <div className="lg:col-span-2">
+          <div className={`${
+            settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'
+          } rounded-xl p-6 shadow-xl`}>
+            
+            {/* Dealer Hand */}
             <div className="mb-8">
-              <h2 className="text-center text-xl font-semibold mb-4 opacity-80">
-                Dealer {G.dealerHand.length > 0 && (
-                  <span className="text-2xl">
-                    ({G.showDealer ? dVal : calc([G.dealerHand[1]])})
-                  </span>
+              <div className="text-center mb-4">
+                <h3 className="text-sm text-gray-400 uppercase tracking-wider">Dealer</h3>
+                {game.dealerCards.length > 0 && (
+                  <p className="text-2xl font-bold mt-1">
+                    {game.dealerRevealed ? dealerValue : `?/${dealerVisibleValue}`}
+                  </p>
                 )}
-              </h2>
-              <div className="flex flex-wrap justify-center gap-3 min-h-[150px] items-center">
+              </div>
+              <div className="flex justify-center gap-2 min-h-[112px]">
                 <AnimatePresence>
-                  {G.dealerHand.map((c, i) => (
-                    <CardComponent key={c.id} {...c} hidden={!G.showDealer && i === 0} />
+                  {game.dealerCards.map((card, index) => (
+                    <Card
+                      key={card.id}
+                      card={card}
+                      hidden={!game.dealerRevealed && index === 0}
+                    />
                   ))}
                 </AnimatePresence>
               </div>
             </div>
-
-            {/* Status Message */}
-            <div className="text-center my-8">
+            
+            {/* Message */}
+            <div className="text-center py-8">
               <AnimatePresence mode="wait">
-                <motion.div
-                  key={G.msg}
-                  initial={{ opacity: 0, y: 20, scale: 0.9 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -20, scale: 0.9 }}
-                  className="text-2xl font-bold"
+                <motion.p
+                  key={game.message}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -10 }}
+                  className={`text-xl font-semibold ${
+                    game.lastResult === 'win' ? 'text-green-400' :
+                    game.lastResult === 'loss' ? 'text-red-400' :
+                    'text-gray-300'
+                  }`}
                 >
-                  {G.msg}
-                </motion.div>
+                  {game.message}
+                </motion.p>
               </AnimatePresence>
             </div>
-
-            {/* Player Section */}
+            
+            {/* Player Hand */}
             <div className="mb-8">
-              <h2 className="text-center text-xl font-semibold mb-4 opacity-80">
-                You {G.playerHand.length > 0 && (
-                  <span className={`text-2xl ${pVal === 21 ? 'text-green-400' : pVal > 21 ? 'text-red-400' : ''}`}>
-                    ({pVal})
-                  </span>
+              <div className="text-center mb-4">
+                <h3 className="text-sm text-gray-400 uppercase tracking-wider">Your Hand</h3>
+                {game.playerCards.length > 0 && (
+                  <p className={`text-2xl font-bold mt-1 ${
+                    playerValue === 21 ? 'text-green-400' :
+                    playerValue > 21 ? 'text-red-400' : ''
+                  }`}>
+                    {playerValue}
+                  </p>
                 )}
-              </h2>
-              <div className="flex flex-wrap justify-center gap-3 min-h-[150px] items-center">
+              </div>
+              <div className="flex justify-center gap-2 min-h-[112px]">
                 <AnimatePresence>
-                  {G.playerHand.map(c => (
-                    <CardComponent key={c.id} {...c} />
+                  {game.playerCards.map((card) => (
+                    <Card key={card.id} card={card} />
                   ))}
                 </AnimatePresence>
               </div>
             </div>
-
-            {/* Game Controls */}
-            <div className="flex justify-center gap-4 flex-wrap">
+            
+            {/* Controls */}
+            <div className="flex justify-center">
               <AnimatePresence mode="wait">
-                {G.phase === 'betting' && (
+                {game.phase === 'waiting' && (
                   <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
-                    className="flex gap-4 items-center flex-wrap justify-center"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="flex items-center gap-4"
                   >
-                    <div className="flex items-center gap-2 bg-black/20 rounded-lg px-4 py-2">
-                      <span className="font-semibold">Bet:</span>
+                    <div className="flex items-center gap-2 bg-gray-700 rounded-lg px-3 py-2">
+                      <button
+                        onClick={() => setBetAmount(Math.max(GAME_CONFIG.minBet, betAmount - 10))}
+                        className="w-8 h-8 bg-gray-600 hover:bg-gray-500 rounded transition-colors"
+                      >
+                        -
+                      </button>
                       <input
                         type="number"
-                        className="bg-white/10 rounded px-3 py-1 w-24 text-center font-bold"
-                        value={G.bet}
-                        onChange={e => G.setBet(+e.target.value)}
-                        min={CONFIG.minBet}
-                        max={G.balance}
-                        step={10}
+                        value={betAmount}
+                        onChange={(e) => setBetAmount(parseInt(e.target.value) || 0)}
+                        onBlur={() => {
+                          const validBet = Math.max(
+                            GAME_CONFIG.minBet, 
+                            Math.min(betAmount, Math.min(game.balance, GAME_CONFIG.maxBet))
+                          );
+                          setBetAmount(validBet);
+                          game.placeBet(validBet);
+                        }}
+                        className="w-20 bg-transparent text-center font-mono"
                       />
+                      <button
+                        onClick={() => setBetAmount(Math.min(game.balance, GAME_CONFIG.maxBet, betAmount + 10))}
+                        className="w-8 h-8 bg-gray-600 hover:bg-gray-500 rounded transition-colors"
+                      >
+                        +
+                      </button>
                     </div>
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={G.deal}
-                      disabled={G.bet > G.balance || G.bet < CONFIG.minBet}
-                      className="px-8 py-3 bg-gradient-to-r from-green-500 to-green-600 rounded-lg font-bold text-white shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    <button
+                      onClick={() => {
+                        game.placeBet(betAmount);
+                        game.deal();
+                      }}
+                      disabled={betAmount > game.balance || betAmount < GAME_CONFIG.minBet}
+                      className="px-6 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
                     >
-                      Deal Cards
-                    </motion.button>
+                      Deal
+                    </button>
                   </motion.div>
                 )}
-
-                {G.phase === 'playing' && (
+                
+                {game.phase === 'playing' && (
                   <motion.div
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.9 }}
-                    className="flex gap-3 flex-wrap justify-center"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="flex gap-3"
                   >
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={G.hit}
-                      className="px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 rounded-lg font-bold text-white shadow-lg"
+                    <button
+                      onClick={game.hit}
+                      disabled={game.isAnimating}
+                      className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors"
                     >
-                      Hit (H)
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={G.stand}
-                      className="px-6 py-3 bg-gradient-to-r from-red-500 to-red-600 rounded-lg font-bold text-white shadow-lg"
+                      Hit
+                    </button>
+                    <button
+                      onClick={game.stand}
+                      disabled={game.isAnimating}
+                      className="px-6 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors"
                     >
-                      Stand (S)
-                    </motion.button>
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={G.double}
-                      disabled={G.playerHand.length !== 2 || G.balance < G.bet}
-                      className="px-6 py-3 bg-gradient-to-r from-yellow-500 to-yellow-600 rounded-lg font-bold text-black shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                      Stand
+                    </button>
+                    <button
+                      onClick={game.double}
+                      disabled={game.playerCards.length !== 2 || game.balance < game.bet || game.isAnimating}
+                      className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
                     >
-                      Double (D)
-                    </motion.button>
+                      Double
+                    </button>
                   </motion.div>
                 )}
-
-                {G.phase === 'ended' && (
+                
+                {game.phase === 'game-over' && (
                   <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
                   >
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.95 }}
-                      onClick={gameOver ? G.reset : G.next}
-                      className="px-8 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-lg font-bold text-white shadow-lg"
+                    <button
+                      onClick={game.balance >= GAME_CONFIG.minBet ? game.nextRound : game.reset}
+                      className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition-colors"
                     >
-                      {gameOver ? '🎮 New Game' : 'Next Round →'}
-                    </motion.button>
+                      {game.balance >= GAME_CONFIG.minBet ? 'Next Round' : 'New Game'}
+                    </button>
                   </motion.div>
                 )}
               </AnimatePresence>
             </div>
           </div>
-
-          {/* Gesture Control Panel */}
-          <div className="bg-gray-800/50 backdrop-blur-xl rounded-2xl overflow-hidden border border-gray-700">
-            {/* Panel Header */}
-            <div className="p-4 bg-gradient-to-r from-purple-600/20 to-pink-600/20 border-b border-gray-700">
-              <div className="flex justify-between items-center mb-2">
-                <h3 className="font-bold text-lg">Gesture Control</h3>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setShowStats(!showStats)}
-                    className="p-2 bg-gray-700/50 rounded-lg hover:bg-gray-600/50 transition-colors"
-                    title="Stats"
-                  >
-                    📊
-                  </button>
-                  <button
-                    onClick={() => setShowSettings(!showSettings)}
-                    className="p-2 bg-gray-700/50 rounded-lg hover:bg-gray-600/50 transition-colors"
-                    title="Settings"
-                  >
-                    ⚙️
-                  </button>
-                  <button
-                    onClick={() => setShowCalibrate(true)}
-                    className="p-2 bg-gray-700/50 rounded-lg hover:bg-gray-600/50 transition-colors"
-                    title="Calibrate"
-                  >
-                    🎯
-                  </button>
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={() => setEnabled(!enabled)}
-                    className={`px-4 py-2 rounded-lg font-semibold transition-all ${
-                      enabled 
-                        ? 'bg-gradient-to-r from-green-500 to-green-600 text-white' 
-                        : 'bg-gray-700/50 text-gray-300'
-                    }`}
-                  >
-                    {enabled ? 'ON' : 'OFF'}
-                  </motion.button>
-                </div>
-              </div>
-              
-              {/* Status Bar */}
-              <div className="flex items-center gap-4 text-sm opacity-80">
-                <span className={`flex items-center gap-1 ${latency < 50 ? 'text-green-400' : latency < 100 ? 'text-yellow-400' : 'text-red-400'}`}>
-                  <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
-                  {latency}ms
-                </span>
-                {enabled && !handDetected && (
-                  <span className="text-yellow-400 animate-pulse">
-                    No hand detected
-                  </span>
-                )}
-              </div>
-            </div>
-
-            {/* Camera View */}
-            <div className="aspect-video bg-black relative">
-              {enabled ? (
-                <>
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className={`w-full h-full object-cover ${mirror}`}
-                  />
-                  
-                  {/* Gesture Overlay */}
-                  <AnimatePresence>
-                    {gesture && (
-                      <motion.div
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: 10 }}
-                        className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-4"
-                      >
-                        <div className="text-center mb-2">
-                          <span className="text-2xl font-bold">
-                            {gesture.name.replace(/_/g, ' ')}
-                          </span>
-                        </div>
-                        <div className="h-3 bg-gray-700 rounded-full overflow-hidden">
-                          <motion.div
-                            className="h-full bg-gradient-to-r from-pink-500 to-blue-500"
-                            initial={{ width: 0 }}
-                            animate={{ width: `${gesture.progress * 100}%` }}
-                            transition={{ duration: 0.1, ease: 'linear' }}
-                          />
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-
-                  {!ready && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-                      <div className="text-center">
-                        <div className="animate-spin rounded-full h-12 w-12 border-4 border-pink-500 border-t-transparent mx-auto mb-4" />
-                        <p>Initializing AI...</p>
-                      </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="flex items-center justify-center h-full">
-                  <div className="text-center text-gray-400 p-8">
-                    <p className="text-6xl mb-4">👋</p>
-                    <p className="text-lg">Enable gesture control</p>
-                    <p className="text-sm opacity-60 mt-2">Press G to toggle</p>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Settings Drawer */}
-            <AnimatePresence>
-              {showSettings && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="border-t border-gray-700"
+        </div>
+        
+        {/* Gesture Control Panel */}
+        <aside className={`${
+          settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'
+        } rounded-xl overflow-hidden shadow-xl`}>
+          <div className="p-4 border-b border-gray-700">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold">Gesture Control</h3>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setShowCalibration(true)}
+                  className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+                  title="Calibrate"
                 >
-                  <div className="p-4 space-y-4">
-                    {/* Gesture Mappings */}
-                    {(['hitGesture', 'standGesture', 'doubleGesture'] as const).map(k => (
-                      <div key={k} className="flex items-center gap-3">
-                        <label className="font-semibold capitalize w-20">
-                          {k.replace('Gesture', '')}
+                  Calibrate
+                </button>
+                <button
+                  onClick={() => setShowLogs(true)}
+                  className="p-2 hover:bg-gray-700 rounded-lg transition-colors"
+                  title="Logs"
+                >
+                  Logs
+                </button>
+                <button
+                  onClick={() => setEnabled(!enabled)}
+                  className={`px-4 py-1 rounded-full text-sm font-medium transition-all ${
+                    enabled ? 'bg-green-600' : 'bg-gray-700'
+                  }`}
+                >
+                  {enabled ? 'ON' : 'OFF'}
+                </button>
+              </div>
+            </div>
+          </div>
+          
+          <div className="aspect-video bg-black relative">
+            {enabled ? (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
+                />
+                
+                {currentGesture && (
+                  <div className="absolute bottom-0 inset-x-0 p-4 bg-gradient-to-t from-black/80">
+                    <p className="text-center font-semibold mb-2">{currentGesture}</p>
+                    <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                      <motion.div
+                        className="h-full bg-green-500"
+                        style={{ width: `${gestureProgress * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="flex items-center justify-center h-full text-gray-500">
+                <div className="text-center">
+                  <p className="text-4xl mb-2">👋</p>
+                  <p>Enable to use gestures</p>
+                </div>
+              </div>
+            )}
+          </div>
+          
+          <div className="p-4 space-y-2 text-sm text-gray-400">
+            <p>✋ {settings.hitGesture} → Hit</p>
+            <p>✊ {settings.standGesture} → Stand</p>
+            <p>👎 {settings.doubleGesture} → Double</p>
+            {calibrationData && (
+              <p className="text-xs text-green-400 mt-2">
+                ✓ Calibrated
+              </p>
+            )}
+          </div>
+        </aside>
+      </main>
+      
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+            onClick={() => setShowSettings(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              className="bg-gray-800 rounded-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 className="text-xl font-bold mb-6">Settings</h2>
+              
+              <div className="space-y-6">
+                {/* Gesture Mappings */}
+                <div>
+                  <h3 className="font-semibold mb-3">Gesture Mappings</h3>
+                  <div className="space-y-3">
+                    {[
+                      { key: 'hitGesture', label: 'Hit' },
+                      { key: 'standGesture', label: 'Stand' },
+                      { key: 'doubleGesture', label: 'Double' }
+                    ].map(({ key, label }) => (
+                      <div key={key}>
+                        <label className="block text-sm text-gray-400 mb-1">
+                          {label} Gesture
                         </label>
                         <select
-                          value={G.settings[k]}
-                          onChange={e => G.updateSettings({ [k]: e.target.value })}
-                          className="flex-1 bg-gray-700/50 rounded-lg px-3 py-2"
+                          value={settings[key as keyof Settings] as string}
+                          onChange={(e) => updateSettings({ [key]: e.target.value })}
+                          className="w-full bg-gray-700 rounded-lg px-3 py-2"
                         >
-                          {GESTURE_OPTIONS.map(o => (
-                            <option key={o} value={o}>
-                              {o.replace(/_/g, ' ')}
+                          {GESTURES.map((gesture) => (
+                            <option key={gesture} value={gesture}>
+                              {gesture.replace(/_/g, ' ')}
                             </option>
                           ))}
                         </select>
                       </div>
                     ))}
-
-                    {/* Hold Time */}
-                    <div className="flex items-center gap-3">
-                      <label className="font-semibold w-20">Hold</label>
+                  </div>
+                </div>
+                
+                {/* Recognition Settings */}
+                <div>
+                  <h3 className="font-semibold mb-3">Recognition</h3>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1">
+                        Hold Time: {settings.holdTime}ms
+                      </label>
                       <input
                         type="range"
-                        min={300}
-                        max={1500}
-                        step={100}
-                        value={G.settings.holdTime}
-                        onChange={e => G.updateSettings({ holdTime: +e.target.value })}
-                        className="flex-1"
+                        min={200}
+                        max={1000}
+                        step={50}
+                        value={settings.holdTime}
+                        onChange={(e) => updateSettings({ holdTime: parseInt(e.target.value) })}
+                        className="w-full"
                       />
-                      <span className="text-sm w-16 text-right">{G.settings.holdTime}ms</span>
                     </div>
-
-                    {/* Confidence */}
-                    <div className="flex items-center gap-3">
-                      <label className="font-semibold w-20">Conf.</label>
+                    
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1">
+                        Confidence: {Math.round(settings.confidence * 100)}%
+                      </label>
                       <input
                         type="range"
                         min={0.5}
                         max={0.95}
                         step={0.05}
-                        value={G.settings.confidence}
-                        onChange={e => G.updateSettings({ confidence: +e.target.value })}
-                        className="flex-1"
+                        value={settings.confidence}
+                        onChange={(e) => updateSettings({ confidence: parseFloat(e.target.value) })}
+                        className="w-full"
                       />
-                      <span className="text-sm w-16 text-right">{(G.settings.confidence * 100).toFixed(0)}%</span>
-                    </div>
-
-                    {/* Toggles */}
-                    <div className="space-y-2">
-                      {[
-                        { key: 'autoLearn', label: 'Auto-adjust confidence' },
-                        { key: 'leftHand', label: 'Left-handed mode' },
-                        { key: 'muted', label: 'Mute sounds' },
-                        { key: 'vibration', label: 'Vibration feedback' }
-                      ].map(({ key, label }) => (
-                        <label key={key} className="flex items-center gap-3 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={G.settings[key as keyof Settings] as boolean}
-                            onChange={e => G.updateSettings({ [key]: e.target.checked })}
-                            className="w-4 h-4 rounded"
-                          />
-                          <span>{label}</span>
-                        </label>
-                      ))}
-                    </div>
-
-                    {/* Theme */}
-                    <div className="flex items-center gap-3">
-                      <label className="font-semibold w-20">Theme</label>
-                      <select
-                        value={G.settings.theme}
-                        onChange={e => G.updateSettings({ theme: e.target.value as 'dark' | 'neon' | 'classic' })}
-                        className="flex-1 bg-gray-700/50 rounded-lg px-3 py-2"
-                      >
-                        <option value="dark">Dark</option>
-                        <option value="neon">Neon</option>
-                        <option value="classic">Classic</option>
-                      </select>
-                    </div>
-
-                    <button
-                      onClick={G.resetSettings}
-                      className="text-sm text-red-400 hover:text-red-300"
-                    >
-                      Reset all settings
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Stats Drawer */}
-            <AnimatePresence>
-              {showStats && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: 'auto', opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  className="border-t border-gray-700"
-                >
-                  <div className="p-4 max-h-64 overflow-y-auto">
-                    <h4 className="font-bold mb-2">Recent Gestures</h4>
-                    <div className="space-y-1 text-sm">
-                      {G.logs.length === 0 ? (
-                        <p className="text-gray-500">No gestures recorded yet</p>
-                      ) : (
-                        G.logs.slice(0, 10).map((log, i) => (
-                          <div key={i} className="flex justify-between text-gray-300">
-                            <span>{log.t}</span>
-                            <span>{log.g.replace(/_/g, ' ')}</span>
-                            <span className="text-green-400">{(log.score * 100).toFixed(0)}%</span>
-                          </div>
-                        ))
-                      )}
                     </div>
                   </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-
-            {/* Legend */}
-            {!showSettings && !showStats && (
-              <div className="p-4 text-center space-y-1 text-sm opacity-60">
-                <p>✋ {G.settings.hitGesture.replace(/_/g, ' ')} = Hit</p>
-                <p>✊ {G.settings.standGesture.replace(/_/g, ' ')} = Stand</p>
-                <p>👎 {G.settings.doubleGesture.replace(/_/g, ' ')} = Double</p>
+                </div>
+                
+                {/* Toggles */}
+                <div className="space-y-2">
+                  <label className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={settings.soundEnabled}
+                      onChange={(e) => updateSettings({ soundEnabled: e.target.checked })}
+                      className="w-4 h-4"
+                    />
+                    <span>Sound Effects</span>
+                  </label>
+                  <label className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={settings.vibrationEnabled}
+                      onChange={(e) => updateSettings({ vibrationEnabled: e.target.checked })}
+                      className="w-4 h-4"
+                    />
+                    <span>Vibration</span>
+                  </label>
+                  <label className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={settings.highContrast}
+                      onChange={(e) => updateSettings({ highContrast: e.target.checked })}
+                      className="w-4 h-4"
+                    />
+                    <span>High Contrast</span>
+                  </label>
+                  <label className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={settings.privacyMode}
+                      onChange={(e) => updateSettings({ privacyMode: e.target.checked })}
+                      className="w-4 h-4"
+                    />
+                    <span>Privacy Mode</span>
+                  </label>
+                </div>
               </div>
-            )}
-          </div>
-        </main>
-      </div>
+              
+              <button
+                onClick={() => setShowSettings(false)}
+                className="mt-6 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              >
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+        
+        {showCalibration && (
+          <CalibrationWizard onClose={() => setShowCalibration(false)} />
+        )}
+        
+        {showLogs && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+            onClick={() => setShowLogs(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              className="bg-gray-800 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold">Gesture Logs</h2>
+                <button
+                  onClick={clearLogs}
+                  className="text-sm text-red-400 hover:text-red-300"
+                >
+                  Clear
+                </button>
+              </div>
+              
+              <div className="space-y-2">
+                {gestureLogs.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">No logs yet</p>
+                ) : (
+                  gestureLogs.slice().reverse().map((log, i) => (
+                    <div
+                      key={i}
+                      className="bg-gray-700 rounded-lg p-3 text-sm font-mono"
+                    >
+                      <div className="flex justify-between">
+                        <span>
+                          <span className="text-blue-400">{log.gesture}</span>
+                          {log.action && (
+                            <span className="ml-2 text-green-400">→ {log.action}</span>
+                          )}
+                        </span>
+                        <span className="text-gray-400">
+                          {new Date(log.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        Confidence: {Math.round(log.confidence * 100)}% | Latency: {log.latency}ms
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              
+              <button
+                onClick={() => setShowLogs(false)}
+                className="mt-4 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              >
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+        
+        {showStats && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+            onClick={() => setShowStats(false)}
+          >
+            <motion.div
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              className="bg-gray-800 rounded-xl p-6 max-w-md w-full"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 className="text-xl font-bold mb-6">Statistics</h2>
+              
+              <div className="space-y-4">
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Hands Played</span>
+                  <span className="font-bold">{game.stats.handsPlayed}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Hands Won</span>
+                  <span className="font-bold">{game.stats.handsWon}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Win Rate</span>
+                  <span className="font-bold">
+                    {game.stats.handsPlayed > 0 
+                      ? Math.round((game.stats.handsWon / game.stats.handsPlayed) * 100) + '%'
+                      : '0%'}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Total Winnings</span>
+                  <span className={`font-bold ${
+                    game.stats.totalWinnings >= 0 ? 'text-green-400' : 'text-red-400'
+                  }`}>
+                    ${game.stats.totalWinnings >= 0 ? '+' : ''}{game.stats.totalWinnings}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Best Streak</span>
+                  <span className="font-bold">{game.stats.bestStreak}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-400">Current Streak</span>
+                  <span className="font-bold text-yellow-400">
+                    {game.stats.currentStreak} 🔥
+                  </span>
+                </div>
+              </div>
+              
+              <button
+                onClick={() => setShowStats(false)}
+                className="mt-6 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors"
+              >
+                Close
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };
 
-/* ── 11 · Bootstrap ────────────────────────────────────────────────────────── */
-const container = document.getElementById('root')!;
-if (container) {
-  createRoot(container).render(
+/* ── CSS Injection ─────────────────────────────────────────────────────────── */
+const styles = document.createElement('style');
+styles.textContent = `
+  .preserve-3d {
+    transform-style: preserve-3d;
+  }
+  .backface-hidden {
+    backface-visibility: hidden;
+  }
+`;
+document.head.appendChild(styles);
+
+/* ── App Bootstrap ─────────────────────────────────────────────────────────── */
+const root = document.getElementById('root');
+if (root) {
+  createRoot(root).render(
     <React.StrictMode>
       <App />
     </React.StrictMode>
   );
 }
-
-/* ── 12 · CSS Animations ──────────────────────────────────────────────────── */
-const style = document.createElement('style');
-style.textContent = `
-  @keyframes blob {
-    0% { transform: translate(0px, 0px) scale(1); }
-    33% { transform: translate(30px, -50px) scale(1.1); }
-    66% { transform: translate(-20px, 20px) scale(0.9); }
-    100% { transform: translate(0px, 0px) scale(1); }
-  }
-  
-  .animate-blob {
-    animation: blob 7s infinite;
-  }
-  
-  .animation-delay-2000 {
-    animation-delay: 2s;
-  }
-  
-  .animation-delay-4000 {
-    animation-delay: 4s;
-  }
-`;
-document.head.appendChild(style);
