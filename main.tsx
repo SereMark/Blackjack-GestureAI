@@ -758,9 +758,9 @@ const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const streamRef = useRef<MediaStream | null>(null);
   
   const gestures = [
-    { key: 'hitGesture', label: 'Hit', icon: '✋' },
-    { key: 'standGesture', label: 'Stand', icon: '✊' },
-    { key: 'doubleGesture', label: 'Double', icon: '👎' }
+    { key: 'hitGesture', label: 'Hit' },
+    { key: 'standGesture', label: 'Stand' },
+    { key: 'doubleGesture', label: 'Double' }
   ];
   
   useEffect(() => {
@@ -972,7 +972,7 @@ const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   i < step ? 'bg-green-600' : 'bg-gray-700'
                 }`}
               >
-                {g.icon} {g.label}
+                {g.label}
               </div>
             ))}
           </div>
@@ -1480,9 +1480,9 @@ const App: React.FC = () => {
           </div>
           
           <div className="p-4 space-y-2 text-sm text-gray-400">
-            <p>✋ {settings.hitGesture} → Hit</p>
-            <p>✊ {settings.standGesture} → Stand</p>
-            <p>👎 {settings.doubleGesture} → Double</p>
+            <p>{settings.hitGesture} → Hit</p>
+            <p>{settings.standGesture} → Stand</p>
+            <p>{settings.doubleGesture} → Double</p>
             {calibrationData && (
               <p className="text-xs text-green-400 mt-2">
                 ✓ Calibrated

@@ -16,7 +16,7 @@ import { LogsModal } from './components/modals/LogsModal';
 import { CalibrationWizard } from './components/CalibrationWizard';
 
 const App: React.FC = () => {
-  const { balance, stats } = useGameStore();
+  const { balance } = useGameStore();
   const { settings } = useSettingsStore();
   const gestureControl = useGestureControl();
   

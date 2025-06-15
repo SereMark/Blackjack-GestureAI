@@ -21,9 +21,9 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
   const streamRef = useRef<MediaStream | null>(null);
   
   const gestures = [
-    { key: 'hitGesture', label: 'Hit', icon: '✋' },
-    { key: 'standGesture', label: 'Stand', icon: '✊' },
-    { key: 'doubleGesture', label: 'Double', icon: '👎' }
+    { key: 'hitGesture', label: 'Hit' },
+    { key: 'standGesture', label: 'Stand' },
+    { key: 'doubleGesture', label: 'Double' }
   ];
   
   useEffect(() => {
@@ -179,7 +179,7 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
           <div className="flex justify-center gap-4 mb-6">
             {gestures.map((g, i) => (
               <div key={g.key} className={`px-4 py-2 rounded-full transition-colors ${i === step ? 'bg-blue-600' : i < step ? 'bg-green-600' : 'bg-gray-700'}`}>
-                {g.icon} {g.label}
+                {g.label}
               </div>
             ))}
           </div>

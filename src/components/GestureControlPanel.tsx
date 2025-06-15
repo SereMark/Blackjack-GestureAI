@@ -58,9 +58,9 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
       </div>
       
       <div className="p-4 space-y-2 text-sm text-gray-400">
-        <p>✋ {settings.hitGesture} → Hit</p>
-        <p>✊ {settings.standGesture} → Stand</p>
-        <p>👎 {settings.doubleGesture} → Double</p>
+        <p>{settings.hitGesture} → Hit</p>
+        <p>{settings.standGesture} → Stand</p>
+        <p>{settings.doubleGesture} → Double</p>
         {calibrationData && (<p className="text-xs text-green-400 mt-2">✓ Calibrated</p>)}
       </div>
     </aside>
