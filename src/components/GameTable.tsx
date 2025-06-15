@@ -18,6 +18,20 @@ export const GameTable: React.FC = () => {
   useEffect(() => {
     setBetAmount(game.bet);
   }, [game.bet]);
+
+  useEffect(() => {
+    if (game.phase === 'game-over') {
+      const timer = setTimeout(() => {
+        if (game.balance >= GAME_CONFIG.minBet) {
+          game.nextRound();
+        } else {
+          game.reset();
+        }
+      }, 2000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [game.phase, game.balance, game.nextRound, game.reset]);
   
   return (
     <div className={`${settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'} rounded-xl p-6 shadow-xl`}>
@@ -83,14 +97,6 @@ export const GameTable: React.FC = () => {
               <button onClick={game.hit} disabled={game.isAnimating} className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors">Hit</button>
               <button onClick={game.stand} disabled={game.isAnimating} className="px-6 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors">Stand</button>
               <button onClick={game.double} disabled={game.playerCards.length !== 2 || game.balance < game.bet || game.isAnimating} className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors">Double</button>
-            </motion.div>
-          )}
-          
-          {game.phase === 'game-over' && (
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-              <button onClick={game.balance >= GAME_CONFIG.minBet ? game.nextRound : game.reset} className="px-6 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg font-semibold transition-colors">
-                {game.balance >= GAME_CONFIG.minBet ? 'Next Round' : 'New Game'}
-              </button>
             </motion.div>
           )}
         </AnimatePresence>
