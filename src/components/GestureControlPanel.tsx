@@ -9,8 +9,6 @@ interface GestureControlPanelProps {
   videoRef: React.RefObject<HTMLVideoElement>;
   currentGesture: string | null;
   gestureProgress: number;
-  onShowCalibration: () => void;
-  onShowLogs: () => void;
   cameraError?: string | null;
   isRecognizerReady?: boolean;
   initializationStep?: string;
@@ -52,7 +50,7 @@ const checkConnectivity = async (): Promise<boolean> => {
 };
 
 export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
-  enabled, setEnabled, videoRef, currentGesture, gestureProgress, onShowCalibration, onShowLogs, 
+  enabled, setEnabled, videoRef, currentGesture, gestureProgress, 
   cameraError, isRecognizerReady, initializationStep = 'idle', currentModel, handleModelChange
 }) => {
   const { settings } = useSettingsStore();
@@ -74,30 +72,14 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
       <div className={`p-4 ${settings.highContrast ? 'border-b-2 border-white' : 'border-b border-gray-700'}`}>
         <div className="flex items-center justify-between">
           <h3 className="font-semibold">Gesture Control</h3>
-          <div className="flex items-center gap-2">
-            <button 
-              onClick={onShowCalibration} 
-              className={`p-2 ${settings.highContrast ? 'hover:bg-gray-800 border border-white' : 'hover:bg-gray-700'} rounded-lg transition-colors text-sm`}
-              title="Calibrate"
-            >
-              Cal
-            </button>
-            <button 
-              onClick={onShowLogs} 
-              className={`p-2 ${settings.highContrast ? 'hover:bg-gray-800 border border-white' : 'hover:bg-gray-700'} rounded-lg transition-colors text-sm`}
-              title="Logs"
-            >
-              Log
-            </button>
-            <button 
-              onClick={() => setEnabled(!enabled)} 
-              className={`px-4 py-1 rounded-full text-sm font-medium transition-all ${
-                enabled ? 'bg-green-600 hover:bg-green-700' : settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'
-              }`}
-            >
-              {enabled ? 'ON' : 'OFF'}
-            </button>
-          </div>
+          <button 
+            onClick={() => setEnabled(!enabled)} 
+            className={`px-4 py-1 rounded-full text-sm font-medium transition-all ${
+              enabled ? 'bg-green-600 hover:bg-green-700' : settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'
+            }`}
+          >
+            {enabled ? 'ON' : 'OFF'}
+          </button>
         </div>
       </div>
       

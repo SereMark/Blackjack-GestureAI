@@ -6,9 +6,11 @@ import { Settings } from '../../types';
 
 interface SettingsModalProps {
   onClose: () => void;
+  onShowCalibration: () => void;
+  onShowLogs: () => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, onShowCalibration, onShowLogs }) => {
   const { settings, updateSettings } = useSettingsStore();
 
   return (
@@ -28,6 +30,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
       >
         <h2 className="text-xl font-bold mb-6">Settings</h2>
         <div className="space-y-6">
+          <div>
+            <h3 className="font-semibold mb-3">Gesture Control</h3>
+            <div className="flex gap-3">
+              <button 
+                onClick={onShowCalibration}
+                className={`flex-1 py-2 px-4 ${settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'} rounded-lg transition-colors text-sm font-medium`}
+              >
+                Calibrate Gestures
+              </button>
+              <button 
+                onClick={onShowLogs}
+                className={`flex-1 py-2 px-4 ${settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'} rounded-lg transition-colors text-sm font-medium`}
+              >
+                View Logs
+              </button>
+            </div>
+          </div>
           <div>
             <h3 className="font-semibold mb-3">Gesture Mappings</h3>
             <div className="space-y-3">
