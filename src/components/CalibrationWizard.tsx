@@ -214,11 +214,11 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
       <motion.div
         initial={{ scale: 0.9 }}
         animate={{ scale: 1 }}
-        className="bg-gray-800 rounded-xl max-w-2xl w-full overflow-hidden"
+        className={`${settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'} rounded-xl max-w-2xl w-full overflow-hidden`}
       >
-        <div className="p-6 border-b border-gray-700 flex items-center justify-between">
+        <div className={`p-6 ${settings.highContrast ? 'border-b-2 border-white' : 'border-b border-gray-700'} flex items-center justify-between`}>
           <h2 className="text-2xl font-bold">Calibrate Gestures</h2>
-          <button onClick={onClose} className="p-2 hover:bg-gray-700 rounded-lg transition-colors">✕</button>
+          <button onClick={onClose} className={`p-2 ${settings.highContrast ? 'hover:bg-gray-800 border border-white' : 'hover:bg-gray-700'} rounded-lg transition-colors`}>✕</button>
         </div>
         
         <div className="aspect-video bg-black relative">
@@ -239,7 +239,9 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
                     <p className="text-gray-400 mb-4">{initError}</p>
                     <button 
                       onClick={() => window.location.reload()} 
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                      className={`px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors ${
+                        settings.highContrast ? 'border border-white' : ''
+                      }`}
                     >
                       Reload Page
                     </button>
@@ -282,7 +284,13 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
               <div 
                 key={g.key} 
                 className={`px-4 py-2 rounded-full transition-colors ${
-                  i === step ? 'bg-blue-600' : i < step ? 'bg-green-600' : 'bg-gray-700'
+                  i === step 
+                    ? 'bg-blue-600' 
+                    : i < step 
+                      ? 'bg-green-600' 
+                      : settings.highContrast 
+                        ? 'bg-gray-900 border border-white' 
+                        : 'bg-gray-700'
                 }`}
               >
                 {g.label}
@@ -299,7 +307,11 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
             <button 
               onClick={startRecording} 
               disabled={recording || countdown > 0 || !isReady} 
-              className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
+              className={`px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors ${
+                settings.highContrast 
+                  ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' 
+                  : 'disabled:bg-gray-600'
+              }`}
             >
               {recording ? 'Recording...' : countdown > 0 ? 'Get Ready...' : 'Start Recording'}
             </button>

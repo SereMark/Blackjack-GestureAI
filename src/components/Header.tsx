@@ -23,7 +23,7 @@ export const Header: React.FC<HeaderProps> = ({
     : 'bg-gray-700 text-white border-transparent hover:bg-gray-600 focus:ring-indigo-500';
 
   return (
-    <header className={`${highContrast ? 'border-b-2 border-white' : 'border-b border-gray-800'} bg-gray-800 px-4 py-3 mb-19`}>      
+    <header className={`${highContrast ? 'bg-black border-b-2 border-white' : 'bg-gray-800 border-b border-gray-800'} px-4 py-3 mb-19`}>      
       <div className="max-w-6xl mx-auto grid grid-cols-3 items-center">
         <div className="flex items-center gap-2">
           <h1 className="text-2xl font-bold">Blackjack</h1>

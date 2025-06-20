@@ -1,6 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { useGameStore } from '../../store/gameStore';
+import { useSettingsStore } from '../../store/settingsStore';
 
 interface StatsModalProps {
   onClose: () => void;
@@ -8,6 +9,7 @@ interface StatsModalProps {
 
 export const StatsModal: React.FC<StatsModalProps> = ({ onClose }) => {
   const { stats } = useGameStore();
+  const { settings } = useSettingsStore();
 
   return (
     <motion.div
@@ -21,7 +23,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ onClose }) => {
         initial={{ scale: 0.9 }}
         animate={{ scale: 1 }}
         exit={{ scale: 0.9 }}
-        className="bg-gray-800 rounded-xl p-6 max-w-md w-full"
+        className={`${settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'} rounded-xl p-6 max-w-md w-full`}
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-xl font-bold mb-6">Statistics</h2>
@@ -55,7 +57,7 @@ export const StatsModal: React.FC<StatsModalProps> = ({ onClose }) => {
             <span className="font-bold text-yellow-400">{stats.currentStreak} 🔥</span>
           </div>
         </div>
-        <button onClick={onClose} className="mt-6 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors">Close</button>
+        <button onClick={onClose} className={`mt-6 w-full py-2 ${settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'} rounded-lg transition-colors`}>Close</button>
       </motion.div>
     </motion.div>
   );

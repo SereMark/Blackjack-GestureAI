@@ -1,6 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { useCalibrationStore } from '../../store/calibrationStore';
+import { useSettingsStore } from '../../store/settingsStore';
 
 interface LogsModalProps {
   onClose: () => void;
@@ -8,6 +9,7 @@ interface LogsModalProps {
 
 export const LogsModal: React.FC<LogsModalProps> = ({ onClose }) => {
   const { gestureLogs, clearLogs } = useCalibrationStore();
+  const { settings } = useSettingsStore();
 
   return (
     <motion.div
@@ -21,7 +23,7 @@ export const LogsModal: React.FC<LogsModalProps> = ({ onClose }) => {
         initial={{ scale: 0.9 }}
         animate={{ scale: 1 }}
         exit={{ scale: 0.9 }}
-        className="bg-gray-800 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+        className={`${settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'} rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
@@ -33,7 +35,7 @@ export const LogsModal: React.FC<LogsModalProps> = ({ onClose }) => {
             <p className="text-gray-500 text-center py-8">No logs yet</p>
           ) : (
             gestureLogs.slice().reverse().map((log, i) => (
-              <div key={i} className="bg-gray-700 rounded-lg p-3 text-sm font-mono">
+              <div key={i} className={`${settings.highContrast ? 'bg-gray-900 border border-white' : 'bg-gray-700'} rounded-lg p-3 text-sm font-mono`}>
                 <div className="flex justify-between">
                   <span>
                     <span className="text-blue-400">{log.gesture}</span>
@@ -48,7 +50,7 @@ export const LogsModal: React.FC<LogsModalProps> = ({ onClose }) => {
             ))
           )}
         </div>
-        <button onClick={onClose} className="mt-4 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors">Close</button>
+        <button onClick={onClose} className={`mt-4 w-full py-2 ${settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'} rounded-lg transition-colors`}>Close</button>
       </motion.div>
     </motion.div>
   );

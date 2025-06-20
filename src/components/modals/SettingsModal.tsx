@@ -23,7 +23,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
         initial={{ scale: 0.9 }}
         animate={{ scale: 1 }}
         exit={{ scale: 0.9 }}
-        className="bg-gray-800 rounded-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto"
+        className={`${settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'} rounded-xl p-6 max-w-md w-full max-h-[90vh] overflow-y-auto`}
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="text-xl font-bold mb-6">Settings</h2>
@@ -38,7 +38,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
               ].map(({ key, label }) => (
                 <div key={key}>
                   <label className="block text-sm text-gray-400 mb-1">{label} Gesture</label>
-                  <select value={settings[key as keyof Settings] as string} onChange={(e) => updateSettings({ [key]: e.target.value })} className="w-full bg-gray-700 rounded-lg px-3 py-2">
+                  <select value={settings[key as keyof Settings] as string} onChange={(e) => updateSettings({ [key]: e.target.value })} className={`w-full ${settings.highContrast ? 'bg-gray-900 border border-white' : 'bg-gray-700'} rounded-lg px-3 py-2`}>
                     {GESTURES.map((gesture) => (
                       <option key={gesture} value={gesture}>{gesture.replace(/_/g, ' ')}</option>
                     ))}
@@ -79,7 +79,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose }) => {
             </label>
           </div>
         </div>
-        <button onClick={onClose} className="mt-6 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg transition-colors">Close</button>
+        <button onClick={onClose} className={`mt-6 w-full py-2 ${settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'} rounded-lg transition-colors`}>Close</button>
       </motion.div>
     </motion.div>
   );

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { GestureRecognizer } from '../lib/gestureRecognizer';
+import { useSettingsStore } from '../store/settingsStore';
 
 interface ModelSelectorProps {
   onModelChange?: (modelType: string) => void;
@@ -9,6 +10,7 @@ interface ModelSelectorProps {
 
 export const ModelSelector = ({ onModelChange, currentModel, disabled }: ModelSelectorProps) => {
   const [isChanging, setIsChanging] = useState(false);
+  const { settings } = useSettingsStore();
   
   const availableModels = GestureRecognizer.getAvailableModels();
   
@@ -32,7 +34,7 @@ export const ModelSelector = ({ onModelChange, currentModel, disabled }: ModelSe
           value={currentModel || ''}
           onChange={(e) => handleModelChange(e.target.value)}
           disabled={disabled || isChanging}
-          className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          className={`w-full px-3 py-2 ${settings.highContrast ? 'bg-gray-900 border-2 border-white' : 'bg-gray-700 border border-gray-600'} rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 ${settings.highContrast ? 'focus:border-white' : 'focus:border-blue-500'} disabled:opacity-50 disabled:cursor-not-allowed`}
         >
           {!currentModel && (
             <option value="" disabled>

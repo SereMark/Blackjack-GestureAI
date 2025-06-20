@@ -76,8 +76,8 @@ export const GameTable: React.FC = () => {
         <AnimatePresence mode="wait">
           {game.phase === 'waiting' && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex items-center gap-4">
-              <div className="flex items-center gap-2 bg-gray-700 rounded-lg px-3 py-2">
-                <button onClick={() => setBetAmount(Math.max(GAME_CONFIG.minBet, betAmount - 10))} className="w-8 h-8 bg-gray-600 hover:bg-gray-500 rounded transition-colors">-</button>
+              <div className={`flex items-center gap-2 ${settings.highContrast ? 'bg-gray-900 border border-white' : 'bg-gray-700'} rounded-lg px-3 py-2`}>
+                <button onClick={() => setBetAmount(Math.max(GAME_CONFIG.minBet, betAmount - 10))} className={`w-8 h-8 ${settings.highContrast ? 'bg-gray-800 border border-white hover:bg-gray-700' : 'bg-gray-600 hover:bg-gray-500'} rounded transition-colors`}>-</button>
                 <input type="number" value={betAmount} onChange={(e) => setBetAmount(parseInt(e.target.value) || 0)}
                   onBlur={() => {
                     const validBet = Math.max(GAME_CONFIG.minBet, Math.min(betAmount, Math.min(game.balance, GAME_CONFIG.maxBet)));
@@ -85,18 +85,18 @@ export const GameTable: React.FC = () => {
                     game.placeBet(validBet);
                   }}
                   className="w-20 bg-transparent text-center font-mono" />
-                <button onClick={() => setBetAmount(Math.min(game.balance, GAME_CONFIG.maxBet, betAmount + 10))} className="w-8 h-8 bg-gray-600 hover:bg-gray-500 rounded transition-colors">+</button>
+                <button onClick={() => setBetAmount(Math.min(game.balance, GAME_CONFIG.maxBet, betAmount + 10))} className={`w-8 h-8 ${settings.highContrast ? 'bg-gray-800 border border-white hover:bg-gray-700' : 'bg-gray-600 hover:bg-gray-500'} rounded transition-colors`}>+</button>
               </div>
               <button onClick={() => { game.placeBet(betAmount); game.deal(); }} disabled={betAmount > game.balance || betAmount < GAME_CONFIG.minBet}
-                className="px-6 py-2 bg-green-600 hover:bg-green-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors">Deal</button>
+                className={`px-6 py-2 bg-green-600 hover:bg-green-700 rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'} disabled:cursor-not-allowed`}>Deal</button>
             </motion.div>
           )}
           
           {game.phase === 'playing' && (
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex gap-3">
-              <button onClick={game.hit} disabled={game.isAnimating} className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors">Hit</button>
-              <button onClick={game.stand} disabled={game.isAnimating} className="px-6 py-2 bg-red-600 hover:bg-red-700 disabled:bg-gray-600 rounded-lg font-semibold transition-colors">Stand</button>
-              <button onClick={game.double} disabled={game.playerCards.length !== 2 || game.balance < game.bet || game.isAnimating} className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors">Double</button>
+              <button onClick={game.hit} disabled={game.isAnimating} className={`px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>Hit</button>
+              <button onClick={game.stand} disabled={game.isAnimating} className={`px-6 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>Stand</button>
+              <button onClick={game.double} disabled={game.playerCards.length !== 2 || game.balance < game.bet || game.isAnimating} className={`px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>Double</button>
             </motion.div>
           )}
         </AnimatePresence>

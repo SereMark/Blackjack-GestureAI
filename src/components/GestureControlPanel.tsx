@@ -71,20 +71,20 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
 
   return (
     <aside className={`${settings.highContrast ? 'bg-black border-4 border-white' : 'bg-gray-800'} rounded-xl overflow-hidden shadow-xl`}>
-      <div className="p-4 border-b border-gray-700">
+      <div className={`p-4 ${settings.highContrast ? 'border-b-2 border-white' : 'border-b border-gray-700'}`}>
         <div className="flex items-center justify-between">
           <h3 className="font-semibold">Gesture Control</h3>
           <div className="flex items-center gap-2">
             <button 
               onClick={onShowCalibration} 
-              className="p-2 hover:bg-gray-700 rounded-lg transition-colors text-sm" 
+              className={`p-2 ${settings.highContrast ? 'hover:bg-gray-800 border border-white' : 'hover:bg-gray-700'} rounded-lg transition-colors text-sm`}
               title="Calibrate"
             >
               Cal
             </button>
             <button 
               onClick={onShowLogs} 
-              className="p-2 hover:bg-gray-700 rounded-lg transition-colors text-sm" 
+              className={`p-2 ${settings.highContrast ? 'hover:bg-gray-800 border border-white' : 'hover:bg-gray-700'} rounded-lg transition-colors text-sm`}
               title="Logs"
             >
               Log
@@ -92,7 +92,7 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
             <button 
               onClick={() => setEnabled(!enabled)} 
               className={`px-4 py-1 rounded-full text-sm font-medium transition-all ${
-                enabled ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-700 hover:bg-gray-600'
+                enabled ? 'bg-green-600 hover:bg-green-700' : settings.highContrast ? 'bg-gray-900 border border-white hover:bg-gray-800' : 'bg-gray-700 hover:bg-gray-600'
               }`}
             >
               {enabled ? 'ON' : 'OFF'}
@@ -138,7 +138,7 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
             ) : !isRecognizerReady ? (
               <div className="text-center p-4">
                 {connectivityMessage ? (
-                  <div className="p-3 bg-gray-700 rounded mb-3">
+                  <div className={`p-3 ${settings.highContrast ? 'bg-gray-900 border border-white' : 'bg-gray-700'} rounded mb-3`}>
                     <p className="text-white text-sm">{connectivityMessage}</p>
                   </div>
                 ) : (
@@ -161,7 +161,7 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
                   <p className="text-center font-semibold mb-2 text-white">
                     {formatGestureName(currentGesture)}
                   </p>
-                  <div className="h-2 bg-gray-700 rounded-full overflow-hidden">
+                  <div className={`h-2 ${settings.highContrast ? 'bg-gray-900 border border-white' : 'bg-gray-700'} rounded-full overflow-hidden`}>
                     <motion.div 
                       className="h-full bg-green-500" 
                       style={{ width: `${gestureProgress * 100}%` }}
@@ -179,7 +179,7 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
           <div className="flex items-center justify-center h-full text-gray-500">
             <div className="text-center">
               <p className="text-lg mb-2">Gesture Control</p>
-              <p className="text-sm">Click ON to enable gestures</p>
+              <p className="text-sm">Click the toggle to enable gestures</p>
             </div>
           </div>
         )}
@@ -194,7 +194,7 @@ export const GestureControlPanel: React.FC<GestureControlPanelProps> = ({
         </div>
       </div>
       
-      <div className="p-4 border-t border-gray-700">
+      <div className={`p-4 ${settings.highContrast ? 'border-t-2 border-white' : 'border-t border-gray-700'}`}>
         <ModelSelector 
           currentModel={currentModel}
           onModelChange={handleModelChange}
