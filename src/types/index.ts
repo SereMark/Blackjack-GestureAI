@@ -69,3 +69,39 @@ export interface GameState {
   nextRound: () => void;
   reset: () => void;
 }
+
+export interface RecognitionResult {
+  name: string;
+  confidence: number;
+  holdProgress: number;
+  shouldTrigger: boolean;
+}
+
+export interface ModelConfig {
+  modelPath?: string;
+  confidence?: number;
+  delegate?: 'CPU' | 'GPU';
+  numHands?: number;
+  minHandDetectionConfidence?: number;
+  minHandPresenceConfidence?: number;
+  minTrackingConfidence?: number;
+  [key: string]: any;
+}
+
+export interface IGestureModel {
+  readonly modelType: string;
+  readonly isReady: boolean;
+  
+  init(video: HTMLVideoElement, config?: ModelConfig): Promise<void>;
+  recognize(video: HTMLVideoElement, timestamp: number): RecognitionResult | null;
+  close(): Promise<void>;
+}
+
+export interface IGestureRecognizer {
+  readonly currentModel: string | null;
+  readonly isReady: boolean;
+  
+  setModel(modelType: string, config?: ModelConfig): Promise<void>;
+  recognize(video: HTMLVideoElement, timestamp: number): RecognitionResult | null;
+  close(): Promise<void>;
+}

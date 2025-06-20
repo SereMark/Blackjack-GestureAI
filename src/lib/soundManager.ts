@@ -15,7 +15,7 @@ export const soundManager = {
       }
       this.initialized = true;
     } catch (error) {
-      console.warn('Sound initialization failed:', error);
+      
     }
   },
 

@@ -12,6 +12,7 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
   const [countdown, setCountdown] = useState(0);
   const [cameraReady, setCameraReady] = useState(false);
   const [recognizerReady, setRecognizerReady] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
   
   const { settings } = useSettingsStore();
   const { addCalibrationSample } = useCalibrationStore();
@@ -32,7 +33,12 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
     const initCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+          video: { 
+            facingMode: 'user', 
+            width: { ideal: 640 }, 
+            height: { ideal: 480 },
+            frameRate: { ideal: 30 }
+          }
         });
         
         if (!mounted) {
@@ -45,30 +51,58 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           
-          await new Promise<void>((resolve) => {
-            if (videoRef.current) {
-              videoRef.current.onloadedmetadata = async () => {
-                try {
-                  await videoRef.current!.play();
-                  if (mounted) { setCameraReady(true); resolve(); }
-                } catch (error) { console.error('Failed to play video:', error); }
-              };
+          await new Promise<void>((resolve, reject) => {
+            if (!videoRef.current) {
+              reject(new Error('Video element not available'));
+              return;
             }
+            
+            const video = videoRef.current;
+            
+            const onLoadedMetadata = async () => {
+              try {
+                await video.play();
+                if (mounted) {
+                  setCameraReady(true);
+                  resolve();
+                }
+              } catch (error) {
+                reject(error);
+              }
+            };
+            
+            const onError = (error: any) => {
+              reject(error);
+            };
+            
+            video.addEventListener('loadedmetadata', onLoadedMetadata, { once: true });
+            video.addEventListener('error', onError, { once: true });
+            
+            setTimeout(() => {
+              video.removeEventListener('loadedmetadata', onLoadedMetadata);
+              video.removeEventListener('error', onError);
+              reject(new Error('Video loading timeout'));
+            }, 10000);
           });
           
-          if (mounted && videoRef.current) {
+          if (mounted && videoRef.current && cameraReady) {
             const recognizer = new GestureRecognizer();
-            await recognizer.init(videoRef.current);
+            await recognizer.init(videoRef.current, 'mediapipe');
             
             if (mounted) {
               recognizerRef.current = recognizer;
               setRecognizerReady(true);
-            } else { await recognizer.close(); }
+            } else { 
+              await recognizer.close(); 
+            }
           }
         }
       } catch (error) {
-        toast.error('Camera access denied. Please allow camera access and reload.');
-        onClose();
+        if (mounted) {
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+          setInitError(`Camera access failed: ${errorMessage}`);
+          toast.error('Camera access denied. Please allow camera access and reload.');
+        }
       }
     };
     
@@ -76,10 +110,47 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
     
     return () => {
       mounted = false;
-      if (streamRef.current) { streamRef.current.getTracks().forEach(track => track.stop()); }
-      if (recognizerRef.current) { recognizerRef.current.close(); }
+      if (streamRef.current) { 
+        streamRef.current.getTracks().forEach(track => track.stop()); 
+        streamRef.current = null;
+      }
+      if (recognizerRef.current) { 
+        recognizerRef.current.close(); 
+        recognizerRef.current = null;
+      }
     };
   }, [onClose]);
+
+  useEffect(() => {
+    if (!cameraReady || recognizerReady || !videoRef.current) return;
+    
+    let mounted = true;
+    
+    const initRecognizer = async () => {
+      try {
+        const recognizer = new GestureRecognizer();
+        await recognizer.init(videoRef.current!, 'mediapipe');
+        
+        if (mounted) {
+          recognizerRef.current = recognizer;
+          setRecognizerReady(true);
+        } else { 
+          await recognizer.close(); 
+        }
+      } catch (error) {
+        if (mounted) {
+          setInitError('Failed to initialize gesture recognition');
+          toast.error('Failed to initialize gesture recognition');
+        }
+      }
+    };
+    
+    initRecognizer();
+    
+    return () => {
+      mounted = false;
+    };
+  }, [cameraReady, recognizerReady]);
   
   const startRecording = async () => {
     if (recording || !recognizerRef.current || !videoRef.current) return;
@@ -131,7 +202,7 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
   };
   
   const currentGesture = gestures[step];
-  const isReady = cameraReady && recognizerReady;
+  const isReady = cameraReady && recognizerReady && !initError;
   
   return (
     <motion.div
@@ -151,18 +222,48 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
         </div>
         
         <div className="aspect-video bg-black relative">
-          <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover ${cameraReady ? 'opacity-100' : 'opacity-0'}`} />
+          <video 
+            ref={videoRef} 
+            autoPlay 
+            playsInline 
+            muted 
+            className="w-full h-full object-cover"
+            style={{ display: cameraReady ? 'block' : 'none' }}
+          />
           {!isReady && (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-center">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-                <p className="text-gray-400">{!cameraReady ? 'Initializing camera...' : 'Loading gesture recognition...'}</p>
+                {initError ? (
+                  <div>
+                    <div className="text-red-400 text-lg mb-4">Initialization Failed</div>
+                    <p className="text-gray-400 mb-4">{initError}</p>
+                    <button 
+                      onClick={() => window.location.reload()} 
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                    >
+                      Reload Page
+                    </button>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
+                    <p className="text-gray-400">
+                      {!cameraReady ? 'Initializing camera...' : 'Loading gesture recognition...'}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}
           {countdown > 0 && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-              <motion.div key={countdown} initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 1.5, opacity: 0 }} className="text-8xl font-bold text-white">
+              <motion.div 
+                key={countdown} 
+                initial={{ scale: 0.5, opacity: 0 }} 
+                animate={{ scale: 1, opacity: 1 }} 
+                exit={{ scale: 1.5, opacity: 0 }} 
+                className="text-8xl font-bold text-white"
+              >
                 {countdown}
               </motion.div>
             </div>
@@ -178,15 +279,28 @@ export const CalibrationWizard: React.FC<{ onClose: () => void }> = ({ onClose }
         <div className="p-6">
           <div className="flex justify-center gap-4 mb-6">
             {gestures.map((g, i) => (
-              <div key={g.key} className={`px-4 py-2 rounded-full transition-colors ${i === step ? 'bg-blue-600' : i < step ? 'bg-green-600' : 'bg-gray-700'}`}>
+              <div 
+                key={g.key} 
+                className={`px-4 py-2 rounded-full transition-colors ${
+                  i === step ? 'bg-blue-600' : i < step ? 'bg-green-600' : 'bg-gray-700'
+                }`}
+              >
                 {g.label}
               </div>
             ))}
           </div>
           <div className="text-center">
-            <p className="text-xl mb-2">Show the <span className="font-bold text-blue-400">{currentGesture.label}</span> gesture</p>
-            <p className="text-gray-400 mb-6">Make the {settings[currentGesture.key as keyof Settings]} gesture</p>
-            <button onClick={startRecording} disabled={recording || countdown > 0 || !isReady} className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors">
+            <p className="text-xl mb-2">
+              Show the <span className="font-bold text-blue-400">{currentGesture.label}</span> gesture
+            </p>
+            <p className="text-gray-400 mb-6">
+              Make the {settings[currentGesture.key as keyof Settings]} gesture
+            </p>
+            <button 
+              onClick={startRecording} 
+              disabled={recording || countdown > 0 || !isReady} 
+              className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors"
+            >
               {recording ? 'Recording...' : countdown > 0 ? 'Get Ready...' : 'Start Recording'}
             </button>
           </div>

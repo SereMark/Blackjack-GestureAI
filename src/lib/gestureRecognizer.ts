@@ -1,104 +1,146 @@
-import { useSettingsStore } from "../store/settingsStore";
+import { useSettingsStore } from '../store/settingsStore';
+import { IGestureModel, IGestureRecognizer, ModelConfig, RecognitionResult } from '../types';
+import { ModelRegistry, defaultModelConfigs } from './models/ModelRegistry';
 
-export class GestureRecognizer {
-  private recognizer: any = null;
-  private ready = false;
+export class GestureRecognizer implements IGestureRecognizer {
+  private model: IGestureModel | null = null;
+  private _currentModel: string | null = null;
   private lastGesture: string | null = null;
-  private lastGestureTime = 0;
-  private cooldownTimer: any = null;
-  
-  async init(video: HTMLVideoElement) {
+  private gestureStartTime: number = 0;
+  private cooldownTimer: number | null = null;
+  private video: HTMLVideoElement | null = null;
+
+  public get currentModel(): string | null {
+    return this._currentModel;
+  }
+
+  public get isReady(): boolean {
+    return this.model?.isReady ?? false;
+  }
+
+  async setModel(modelType: string, config: ModelConfig = {}): Promise<void> {
+    if (this.model) {
+      await this.model.close();
+    }
+
+    this.resetState();
+
     try {
-      const { GestureRecognizer, FilesetResolver } = await import('@mediapipe/tasks-vision');
-      
-      const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.12/wasm'
-      );
-      
-      this.recognizer = await GestureRecognizer.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task',
-          delegate: 'GPU'
-        },
-        runningMode: 'VIDEO',
-        numHands: 1,
-        minHandDetectionConfidence: 0.5,
-        minHandPresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5
-      });
-      
-      this.ready = true;
+      this.model = ModelRegistry.createModel(modelType);
+      this._currentModel = modelType;
+
+      const defaultConfig = defaultModelConfigs[modelType] || {};
+      const finalConfig = { ...defaultConfig, ...config };
+
+      if (this.video) {
+        await this.model.init(this.video, finalConfig);
+      }
     } catch (error) {
-      console.error('Failed to initialize MediaPipe:', error);
-      throw error;
+      this.model = null;
+      this._currentModel = null;
+      throw new Error(`Failed to set model '${modelType}': ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
-  
-  recognize(video: HTMLVideoElement, timestamp: number) {
-    if (!this.ready || !this.recognizer || !video.videoWidth) return null;
-    
-    try {
-      const results = this.recognizer.recognizeForVideo(video, timestamp);
-      const gesture = results.gestures?.[0]?.[0];
-      
-      if (gesture && gesture.score >= useSettingsStore.getState().settings.confidence) {
-        const now = Date.now();
-        
-        if (gesture.categoryName !== this.lastGesture) {
-          this.lastGesture = gesture.categoryName;
-          this.lastGestureTime = now;
-          return {
-            name: gesture.categoryName,
-            confidence: gesture.score,
-            holdProgress: 0,
-            shouldTrigger: false
-          };
-        }
-        
-        const holdDuration = now - this.lastGestureTime;
-        const holdTime = useSettingsStore.getState().settings.holdTime;
-        const holdProgress = Math.min(holdDuration / holdTime, 1);
-        
-        if (holdProgress === 1 && !this.cooldownTimer) {
-          this.cooldownTimer = setTimeout(() => {
-            this.cooldownTimer = null;
-            this.lastGesture = null;
-          }, 1000);
-          
-          return {
-            name: gesture.categoryName,
-            confidence: gesture.score,
-            holdProgress: 1,
-            shouldTrigger: true
-          };
-        }
-        
-        return {
-          name: gesture.categoryName,
-          confidence: gesture.score,
-          holdProgress,
-          shouldTrigger: false
-        };
-      }
-      
+
+  async init(video: HTMLVideoElement, modelType: string = 'mediapipe', config: ModelConfig = {}): Promise<void> {
+    this.video = video;
+    await this.setModel(modelType, config);
+  }
+
+  recognize(video: HTMLVideoElement, timestamp: number): RecognitionResult | null {
+    if (!this.model?.isReady) {
+      return null;
+    }
+
+    const rawResult = this.model.recognize(video, timestamp);
+    if (!rawResult) {
       if (!this.cooldownTimer) {
         this.lastGesture = null;
       }
       return null;
-    } catch (error) {
+    }
+
+    const minConfidence = useSettingsStore.getState().settings.confidence;
+    if (rawResult.confidence < minConfidence) {
+      if (!this.cooldownTimer) {
+        this.lastGesture = null;
+      }
       return null;
     }
+
+    const currentTime = Date.now();
+    const holdTime = useSettingsStore.getState().settings.holdTime;
+    const gestureName = rawResult.name;
+
+    if (this.lastGesture !== gestureName) {
+      this.lastGesture = gestureName;
+      this.gestureStartTime = currentTime;
+      
+      if (this.cooldownTimer) {
+        clearTimeout(this.cooldownTimer);
+        this.cooldownTimer = null;
+      }
+    }
+
+    const holdDuration = currentTime - this.gestureStartTime;
+    const holdProgress = Math.min(holdDuration / holdTime, 1);
+    const shouldTrigger = holdProgress >= 1 && !this.cooldownTimer;
+
+    if (shouldTrigger) {
+      this.cooldownTimer = setTimeout(() => {
+        this.cooldownTimer = null;
+        this.lastGesture = null;
+      }, 1000) as unknown as number;
+    }
+
+    return {
+      name: gestureName,
+      confidence: rawResult.confidence,
+      holdProgress,
+      shouldTrigger
+    };
   }
-  
-  async close() {
+
+
+  static getAvailableModels(): string[] {
+    return ModelRegistry.getAvailableModels();
+  }
+
+
+  static hasModel(modelType: string): boolean {
+    return ModelRegistry.hasModel(modelType);
+  }
+
+
+  static registerModel(modelType: string, factory: () => IGestureModel): void {
+    ModelRegistry.registerModel(modelType, factory);
+  }
+
+
+  static getDefaultConfig(modelType: string): ModelConfig {
+    return defaultModelConfigs[modelType] ? { ...defaultModelConfigs[modelType] } : {};
+  }
+
+
+  async close(): Promise<void> {
+    this.resetState();
+    
+    if (this.model) {
+      await this.model.close();
+      this.model = null;
+    }
+    
+    this._currentModel = null;
+    this.video = null;
+  }
+
+  private resetState(): void {
+    this.lastGesture = null;
+    this.gestureStartTime = 0;
+    
     if (this.cooldownTimer) {
       clearTimeout(this.cooldownTimer);
       this.cooldownTimer = null;
-    }
-    if (this.recognizer) {
-      await this.recognizer.close();
-      this.recognizer = null;
-      this.ready = false;
     }
   }
 }

@@ -59,19 +59,19 @@ export const useGameStore = create<GameState>()(
         const dealSequence = async () => {
           soundManager.play('deal');
           
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 200));
           set({ playerCards: [playerCards[0]] });
           
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 200));
           set({ dealerCards: [dealerCards[0]] });
           
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 200));
           set({ playerCards });
           
-          await new Promise(r => setTimeout(r, 300));
+          await new Promise(r => setTimeout(r, 200));
           set({ dealerCards });
           
-          await new Promise(r => setTimeout(r, 400));
+          await new Promise(r => setTimeout(r, 300));
           
           const playerValue = calculateHandValue(playerCards);
           const dealerValue = calculateHandValue(dealerCards);
@@ -130,9 +130,9 @@ export const useGameStore = create<GameState>()(
         
         set({ isAnimating: true });
         
-        const newCard = deck.pop()!;
-        const newPlayerCards = [...playerCards, newCard];
         const newDeck = [...deck];
+        const newCard = newDeck.pop()!;
+        const newPlayerCards = [...playerCards, newCard];
         
         set({
           deck: newDeck,
@@ -155,11 +155,11 @@ export const useGameStore = create<GameState>()(
             soundManager.play('lose');
           } else if (value === 21) {
             set({ message: '21! Standing...', isAnimating: false });
-            setTimeout(() => get().stand(), 600);
+            setTimeout(() => get().stand(), 400);
           } else {
             set({ isAnimating: false });
           }
-        }, 400);
+        }, 300);
       },
       
       stand: () => {
@@ -176,11 +176,16 @@ export const useGameStore = create<GameState>()(
         const dealerPlay = async () => {
           await new Promise(r => setTimeout(r, 600));
           
+          let dealerPlayCount = 0;
+          const maxDealerCards = 10;
+          
           const playDealer = () => {
             const { deck, dealerCards, playerCards, bet, balance, stats } = get();
             const dealerValue = calculateHandValue(dealerCards);
             
-            if (dealerValue >= GAME_CONFIG.dealerStandValue || deck.length === 0) {
+            dealerPlayCount++;
+            
+            if (dealerPlayCount > maxDealerCards || dealerValue >= 21 || dealerValue >= GAME_CONFIG.dealerStandValue || deck.length === 0) {
               const playerValue = calculateHandValue(playerCards);
               let message = '';
               let winAmount = 0;
@@ -225,13 +230,46 @@ export const useGameStore = create<GameState>()(
               
               soundManager.play(result === 'win' ? 'win' : 'lose');
             } else {
-              const newCard = deck.pop()!;
-              set({
-                deck: [...deck],
-                dealerCards: [...dealerCards, newCard]
-              });
-              
-              setTimeout(playDealer, 800);
+              if (deck.length > 0) {
+                const newDeck = [...deck];
+                const newCard = newDeck.pop()!;
+                
+                set({
+                  deck: newDeck,
+                  dealerCards: [...dealerCards, newCard]
+                });
+                
+                setTimeout(playDealer, 600);
+              } else {
+                const playerValue = calculateHandValue(playerCards);
+                let message = '';
+                let winAmount = 0;
+                let result: 'win' | 'loss' | 'push';
+                
+                if (playerValue > dealerValue) {
+                  message = 'You win!';
+                  winAmount = bet * 2;
+                  result = 'win';
+                } else if (playerValue < dealerValue) {
+                  message = 'Dealer wins';
+                  winAmount = 0;
+                  result = 'loss';
+                } else {
+                  message = 'Push!';
+                  winAmount = bet;
+                  result = 'push';
+                }
+                
+                set({
+                  phase: 'game-over',
+                  message,
+                  balance: balance + winAmount,
+                  lastResult: result,
+                  isAnimating: false
+                });
+                
+                soundManager.play(result === 'win' ? 'win' : 'lose');
+              }
             }
           };
           
@@ -254,7 +292,7 @@ export const useGameStore = create<GameState>()(
           if (value <= 21 && currentPhase === 'playing') {
             get().stand();
           }
-        }, 600);
+        }, 400);
       },
       
       nextRound: () => {
