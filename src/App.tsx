@@ -71,13 +71,23 @@ const App: React.FC = () => {
         <div className="lg:col-span-2"><GameTable /></div>
         <GestureControlPanel
           {...gestureControl}
-          onShowCalibration={() => setShowCalibration(true)}
-          onShowLogs={() => setShowLogs(true)}
         />
       </main>
 
       <AnimatePresence>
-        {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+        {showSettings && (
+          <SettingsModal 
+            onClose={() => setShowSettings(false)} 
+            onShowCalibration={() => {
+              setShowSettings(false);
+              setShowCalibration(true);
+            }}
+            onShowLogs={() => {
+              setShowSettings(false);
+              setShowLogs(true);
+            }}
+          />
+        )}
         {showStats && <StatsModal onClose={() => setShowStats(false)} />}
         {showLogs && <LogsModal onClose={() => setShowLogs(false)} />}
         {showCalibration && <CalibrationWizard onClose={() => setShowCalibration(false)} />}
