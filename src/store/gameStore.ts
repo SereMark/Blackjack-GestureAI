@@ -139,8 +139,6 @@ export const useGameStore = create<GameState>()(
           playerCards: newPlayerCards
         });
         
-        soundManager.play('deal');
-        
         setTimeout(() => {
           const value = calculateHandValue(newPlayerCards);
           
@@ -233,7 +231,6 @@ export const useGameStore = create<GameState>()(
                 dealerCards: [...dealerCards, newCard]
               });
               
-              soundManager.play('deal');
               setTimeout(playDealer, 800);
             }
           };
