@@ -97,6 +97,11 @@ export const GameTable: React.FC = () => {
               <button onClick={game.hit} disabled={game.isAnimating} className={`px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>Hit</button>
               <button onClick={game.stand} disabled={game.isAnimating} className={`px-6 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>Stand</button>
               <button onClick={game.double} disabled={game.playerCards.length !== 2 || game.balance < game.bet || game.isAnimating} className={`px-6 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:cursor-not-allowed rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>Double</button>
+               <button
+                onClick={() => game.reset()}
+                className={`px-6 py-2 bg-red-600 hover:bg-red-700 rounded-lg font-semibold transition-colors ${settings.highContrast ? 'disabled:bg-gray-900 disabled:border disabled:border-gray-500' : 'disabled:bg-gray-600'}`}>
+                Exit
+              </button>
             </motion.div>
           )}
         </AnimatePresence>
